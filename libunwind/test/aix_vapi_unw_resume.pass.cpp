@@ -39,6 +39,7 @@ extern "C" void *returns_twice_bsearch
                             int (*)(const void *,
                                     const void *)) __asm__("bsearch");
 
+static bool llu_enabled;
 static unw_cursor_t bsearch_cursor;
 static unw_cursor_t bsearch_caller_cursor;
 static unw_cursor_t main_cursor;
@@ -57,11 +58,17 @@ extern "C" int cmp(const void *pa, const void *pb) {
   unw_init_local(&cursor, &context);
   // Step from `cmp` up to `bsearch`.
   unw_step(&cursor);
+  if (!llu_enabled)
+    fprintf(stderr,
+            "libunwind: the next return address=VAPI_NOT_ENABLED from VAPI\n");
   // CHECK-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=cmp
   // CHECK: libunwind: the next return address=[[VAPI_RA:[^ ]*]] from VAPI
   bsearch_cursor = cursor;
   // Step from `bsearch` up to `bsearch_caller`.
   unw_step(&cursor);
+  if (!llu_enabled)
+    fprintf(stderr,
+            "libunwind: return address=VAPI_NOT_ENABLED from VAPI\n");
   // CHECK-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=bsearch
   // CHECK: libunwind: return address=[[VAPI_RA]] from VAPI
   bsearch_caller_cursor = cursor;
@@ -76,6 +83,7 @@ extern "C" int cmp(const void *pa, const void *pb) {
           "Return to `bsearch` with r3 set to 0 using the global cursor.\n");
   unw_set_reg(&bsearch_cursor, R3, (unw_word_t)0);
   unw_resume(&bsearch_cursor);
+  __builtin_unreachable();
   // CHECK-LABEL: Return to `bsearch`
   // CHECK-NOT: VAPI: executing return glue
 }
@@ -96,8 +104,11 @@ void *bsearch_caller(void) {
             "`returns_twice_bsearch` (really `bsearch`) with r3 set to "
             "&buf[%d] using the global cursor.\n",
             state);
+    if (!llu_enabled)
+      fprintf(stderr, "libunwind: VAPI: executing return glue VAPI_NOT_ENABLED\n");
     unw_set_reg(&bsearch_caller_cursor, R3, (unw_word_t)&buf[state]);
     unw_resume(&bsearch_caller_cursor);
+    __builtin_unreachable();
     // CHECK-LABEL: Return to `bsearch_caller` {{.*}}&buf[1]
     // CHECK: libunwind: VAPI: executing return glue
     // CHECK-LABEL: Return to `bsearch_caller` {{.*}}&buf[2]
@@ -108,16 +119,36 @@ void *bsearch_caller(void) {
   // caller.
   fprintf(stderr, "Return to `main` at the invocation of `bsearch_caller` with "
                   "r3 set to `&bsearch_caller_ret` using the global cursor.\n");
+  if (!llu_enabled)
+    fprintf(stderr, "libunwind: VAPI: executing return glue VAPI_NOT_ENABLED\n");
   unw_set_reg(&main_cursor, R3, (unw_word_t)&bsearch_caller_ret);
   unw_resume(&main_cursor);
+  __builtin_unreachable();
   // CHECK-LABEL: Return to `main`
   // CHECK: libunwind: VAPI: executing return glue
 }
+
+// VAPI glue addresses
+constexpr uintptr_t vapi_glue_addr_ext_32 = 0x8b80;
+constexpr uintptr_t vapi_addr_64 = 0x8e00;
+constexpr size_t vapi_size_64 = 0x0200;
+constexpr uintptr_t vapi_glue_addr_begin = vapi_glue_addr_ext_32;
+constexpr uintptr_t vapi_glue_addr_end = vapi_addr_64 + vapi_size_64;
+
+struct FunctionDescriptor {
+  uintptr_t entry;
+  uintptr_t toc;
+  uintptr_t env;
+};
 
 int main(void) {
   if (setenv("LIBUNWIND_PRINT_UNWINDING", "1", true) != 0) {
     perror("setenv");
     abort();
   }
+
+  FunctionDescriptor *fd = reinterpret_cast<FunctionDescriptor *>(bsearch);
+  llu_enabled = vapi_glue_addr_begin <= fd->entry && fd->entry < vapi_glue_addr_end;
+
   assert(bsearch_caller() == &bsearch_caller_ret);
 }
