@@ -77,6 +77,7 @@ extern "C" int cmp(const void *pa, const void *pb) {
   unw_set_reg(&bsearch_cursor, R3, (unw_word_t)0);
   unw_resume(&bsearch_cursor);
   // CHECK-LABEL: Return to `bsearch`
+  // CHECK-NOT: VAPI: executing return glue
 }
 
 char bsearch_caller_ret;
@@ -98,7 +99,9 @@ void *bsearch_caller(void) {
     unw_set_reg(&bsearch_caller_cursor, R3, (unw_word_t)&buf[state]);
     unw_resume(&bsearch_caller_cursor);
     // CHECK-LABEL: Return to `bsearch_caller` {{.*}}&buf[1]
+    // CHECK: libunwind: VAPI: executing return glue
     // CHECK-LABEL: Return to `bsearch_caller` {{.*}}&buf[2]
+    // CHECK: libunwind: VAPI: executing return glue
   }
 
   // Test resuming context where VAPI is not active, one frame up from the VAPI
@@ -108,6 +111,7 @@ void *bsearch_caller(void) {
   unw_set_reg(&main_cursor, R3, (unw_word_t)&bsearch_caller_ret);
   unw_resume(&main_cursor);
   // CHECK-LABEL: Return to `main`
+  // CHECK: libunwind: VAPI: executing return glue
 }
 
 int main(void) {
