@@ -28,7 +28,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// VAPI glue addresses
+constexpr uintptr_t vapi_glue_addr_ext_32 = 0x8b80;
+constexpr uintptr_t vapi_addr_64 = 0x8e00;
+constexpr size_t vapi_size_64 = 0x0200;
+constexpr uintptr_t vapi_glue_addr_begin = vapi_glue_addr_ext_32;
+constexpr uintptr_t vapi_glue_addr_end = vapi_addr_64 + vapi_size_64;
+
+struct FunctionDescriptor {
+  uintptr_t entry;
+  uintptr_t toc;
+  uintptr_t env;
+};
+
 void my_atexit_handler(void) {
+  FunctionDescriptor *fd = reinterpret_cast<FunctionDescriptor *>(exit);
+  bool llu_enabled =
+      vapi_glue_addr_begin <= fd->entry && fd->entry < vapi_glue_addr_end;
+
   fprintf(stderr, "Retrieve a cursor to `main` by stepping up.\n");
   // CHECK-LABEL: Retrieve a cursor to `main`
   unw_context_t context;
@@ -37,6 +54,8 @@ void my_atexit_handler(void) {
   unw_init_local(&cursor, &context);
   // Step from `my_atexit_handler` up to `exit`.
   unw_step(&cursor);
+  if (!llu_enabled)
+    fprintf(stderr, "libunwind: the next return address=VAPI_NOT_ENABLED from VAPI\n");
   // DEBUG-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=_Z17my_atexit_handlerv
   // DEBUG: libunwind: the next return address={{[^ ]*}} from VAPI
   // DEBUG: libunwind: The next is a signal handler frame
@@ -51,6 +70,8 @@ void my_atexit_handler(void) {
 
   fprintf(stderr, "Resume `main` at the call to `trapper`.\n");
   // CHECK-LABEL: Resume `main`
+  if (!llu_enabled)
+    fprintf(stderr, "libunwind: VAPI: executing return glue VAPI_NOT_ENABLED\n");
   unw_resume(&cursor);
   __builtin_unreachable();
   // DEBUG: libunwind: VAPI: executing return glue
