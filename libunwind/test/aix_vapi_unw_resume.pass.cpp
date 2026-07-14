@@ -12,7 +12,8 @@
 // ADDITIONAL_COMPILE_FLAGS: -fno-inline -fno-exceptions
 
 // RUN: %{build}
-// RUN: %{exec} %t.exe 2>&1 | FileCheck %s
+// RUN: %{exec} %t.exe \
+// RUN:     %if libunwind-assertions-enabled %{ 2>&1 | FileCheck %s %}
 
 // Tests use of the libunwind C API to step up from a context where the VAPI is
 // active and to resume contexts where
