@@ -38,12 +38,16 @@ void my_atexit_handler(void) {
   // Step from `my_atexit_handler` up to `exit`.
   unw_step(&cursor);
   // DEBUG-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=_Z17my_atexit_handlerv
+  // DEBUG: libunwind: the next return address={{[^ ]*}} from VAPI
+  // DEBUG: libunwind: The next is a signal handler frame
   // Step from `exit` (signal handler, VAPI) up to `trapper`.
   unw_step(&cursor);
   // DEBUG-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=exit
+  // DEBUG-NEXT: libunwind: Possible signal handler frame
   // Step from `trapper` up to `main`.
   unw_step(&cursor);
   // DEBUG-LABEL: libunwind: stepWithTBTable: Look up traceback table of func=_Z7trapperv
+  // DEBUG-NOT: VAPI
 
   fprintf(stderr, "Resume `main` at the call to `trapper`.\n");
   // CHECK-LABEL: Resume `main`
