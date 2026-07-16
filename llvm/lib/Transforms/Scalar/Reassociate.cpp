@@ -31,7 +31,6 @@
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/GlobalsModRef.h"
-#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
@@ -2295,11 +2294,9 @@ void ReassociatePass::ReassociateExpression(BinaryOperator *I) {
 
   LLVM_DEBUG(dbgs() << "RAIn:\t"; PrintOps(I, Ops); dbgs() << '\n');
 
-  // On targets that report branch divergence (TTI.hasBranchDivergence()),
-  // boost the rank of divergent operands so they sort towards the root of
-  // the expression tree.  This clusters uniform operands together at the
-  // leaves, forming sub-expressions whose operands are all uniform and that
-  // can be evaluated in the target's uniform-execution domain.
+  // Boost the rank of divergent operands so they sort towards the root of the
+  // expression tree, clustering uniform operands together at the leaves. On
+  // targets without divergence UniformityInfo is empty and this is a no-op.
   //
   // Example: (uniform1 + divergent) + uniform2
   //       -> (uniform1 + uniform2) + divergent
@@ -2573,16 +2570,10 @@ ReassociatePass::BuildPairMap(ReversePostOrderTraversal<Function *> &RPOT) {
 
 PreservedAnalyses ReassociatePass::run(Function &F,
                                        FunctionAnalysisManager &AM) {
-  // On targets with branch divergence, obtain UniformityInfo so we can group
-  // uniform operands together in expression trees. TargetTransformInfo is only
-  // queried to gate this on hasBranchDivergence(): targets without divergence
-  // (the common case) never compute UniformityInfo and pay no extra cost.
-  UniformityInfo *UI = nullptr;
-  const TargetTransformInfo &TTI = AM.getResult<TargetIRAnalysis>(F);
-  if (TTI.hasBranchDivergence(&F))
-    UI = &AM.getResult<UniformityInfoAnalysis>(F);
-
-  return runImpl(F, UI);
+  // UniformityInfo is empty (and cheap) on targets without branch divergence,
+  // so request it unconditionally.
+  UniformityInfo &UI = AM.getResult<UniformityInfoAnalysis>(F);
+  return runImpl(F, &UI);
 }
 
 PreservedAnalyses ReassociatePass::runImpl(Function &F, UniformityInfo *UI) {
@@ -2682,22 +2673,15 @@ public:
     if (skipFunction(F))
       return false;
 
-    // On targets with branch divergence, provide UniformityInfo so uniform
-    // operands can be grouped together; other targets pass null.
-    const TargetTransformInfo &TTI =
-        getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
-    UniformityInfo *UI =
-        TTI.hasBranchDivergence(&F)
-            ? &getAnalysis<UniformityInfoWrapperPass>().getUniformityInfo()
-            : nullptr;
+    UniformityInfo &UI =
+        getAnalysis<UniformityInfoWrapperPass>().getUniformityInfo();
 
-    PreservedAnalyses PA = Impl.runImpl(F, UI);
+    PreservedAnalyses PA = Impl.runImpl(F, &UI);
     return !PA.areAllPreserved();
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
-    AU.addRequired<TargetTransformInfoWrapperPass>();
     AU.addRequired<UniformityInfoWrapperPass>();
     AU.addPreserved<AAResultsWrapperPass>();
     AU.addPreserved<BasicAAWrapperPass>();
@@ -2711,7 +2695,6 @@ char ReassociateLegacyPass::ID = 0;
 
 INITIALIZE_PASS_BEGIN(ReassociateLegacyPass, "reassociate",
                       "Reassociate expressions", false, false)
-INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(UniformityInfoWrapperPass)
 INITIALIZE_PASS_END(ReassociateLegacyPass, "reassociate",
                     "Reassociate expressions", false, false)
