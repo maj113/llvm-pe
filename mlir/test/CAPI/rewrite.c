@@ -627,7 +627,7 @@ static MlirConversionTargetLegality dynamicLegalityAlwaysLegal(MlirOperation op,
                                                                void *userData) {
   (void)op;
   intptr_t *counter = (intptr_t *)userData;
-  (*counter)++;
+  ++(*counter);
   return MLIR_CONVERSION_TARGET_LEGALITY_LEGAL;
 }
 
@@ -635,7 +635,7 @@ static MlirConversionTargetLegality
 dynamicLegalityAlwaysIllegal(MlirOperation op, void *userData) {
   (void)op;
   intptr_t *counter = (intptr_t *)userData;
-  (*counter)++;
+  ++(*counter);
   return MLIR_CONVERSION_TARGET_LEGALITY_ILLEGAL;
 }
 
@@ -643,7 +643,7 @@ static MlirConversionTargetLegality dynamicLegalityNoOpinion(MlirOperation op,
                                                              void *userData) {
   (void)op;
   intptr_t *counter = (intptr_t *)userData;
-  (*counter)++;
+  ++(*counter);
   return MLIR_CONVERSION_TARGET_LEGALITY_NO_OPINION;
 }
 
@@ -823,7 +823,7 @@ static MlirValue buildCastMaterialization(MlirRewriterBase rewriter,
                                           void *userData) {
   intptr_t *counter = (intptr_t *)userData;
   if (counter)
-    (*counter)++;
+    ++(*counter);
   MlirOperationState state =
       mlirOperationStateGet(mlirStringRefCreateFromCString("test.cast"), loc);
   mlirOperationStateAddOperands(&state, nInputs, inputs);
