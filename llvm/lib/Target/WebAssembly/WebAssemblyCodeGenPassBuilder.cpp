@@ -83,7 +83,7 @@ public:
   void addPreEmitPass(PassManagerWrapper &PMW) const;
   void addAsmPrinterBegin(PassManagerWrapper &PMW) const;
   void addAsmPrinter(PassManagerWrapper &PMW) const;
-  void adddAsmPrinterEnd(PassManagerWrapper &PMW) const;
+  void addAsmPrinterEnd(PassManagerWrapper &PMW) const;
 };
 
 void WebAssemblyCodeGenPassBuilder::addIRPasses(PassManagerWrapper &PMW) const {
@@ -259,7 +259,7 @@ void WebAssemblyCodeGenPassBuilder::addAsmPrinter(
   addMachineFunctionPass(WebAssemblyAsmPrinterPass(), PMW);
 }
 
-void WebAssemblyCodeGenPassBuilder::adddAsmPrinterEnd(
+void WebAssemblyCodeGenPassBuilder::addAsmPrinterEnd(
     PassManagerWrapper &PMW) const {
   addModulePass(WebAssemblyAsmPrinterEndPass(), PMW);
 }
