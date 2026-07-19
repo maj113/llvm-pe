@@ -440,13 +440,6 @@ static std::unique_ptr<MachineFunction> cloneMF(MachineFunction *SrcMF,
   return DstMF;
 }
 
-static void initializeTargetInfo() {
-  InitializeAllTargets();
-  InitializeAllTargetMCs();
-  InitializeAllAsmPrinters();
-  InitializeAllAsmParsers();
-}
-
 void ReducerWorkItem::print(raw_ostream &ROS, void *p) const {
   if (MMI) {
     printMIR(ROS, *M);
@@ -829,8 +822,6 @@ llvm::parseReducerWorkItem(StringRef ToolName, StringRef Filename,
   Triple TheTriple;
 
   auto MMM = std::make_unique<ReducerWorkItem>();
-
-  initializeTargetInfo();
 
   if (IsMIR) {
     auto FileOrErr = MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/true);
