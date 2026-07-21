@@ -871,7 +871,11 @@ void IdataContents::create(COFFLinkerContext &ctx) {
     }
 
     // Create the import table header.
-    dllNames.push_back(make<StringChunk>(syms[0]->getDLLName()));
+    StringRef dllName = syms[0]->getDLLName();
+    if (omitLookupTable && dllName.size() > 4 &&
+        dllName.substr(dllName.size() - 4).equals_insensitive(".dll"))
+      dllName = dllName.drop_back(4);
+    dllNames.push_back(make<StringChunk>(dllName));
     auto *dir = make<ImportDirectoryChunk>(dllNames.back());
 
     if (ctx.hybridSymtab && nativeOnly) {
