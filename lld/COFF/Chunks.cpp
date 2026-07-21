@@ -804,9 +804,10 @@ ImportThunkChunk::ImportThunkChunk(COFFLinkerContext &ctx, Defined *s)
 
 ImportThunkChunkX64::ImportThunkChunkX64(COFFLinkerContext &ctx, Defined *s)
     : ImportThunkChunk(ctx, s) {
-  // Intel Optimization Manual says that all branch targets
-  // should be 16-byte aligned. MSVC linker does this too.
-  setAlignment(16);
+  // Intel Optimization Manual says that all branch targets should be 16-byte
+  // aligned. MSVC linker does this too. For flat, byte-aligned images, avoid
+  // spending up to 15 bytes of padding on import thunks.
+  setAlignment(ctx.config.align < 0x1000 ? 1 : 16);
 }
 
 void ImportThunkChunkX64::writeTo(uint8_t *buf) const {
