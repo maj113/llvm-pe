@@ -1860,6 +1860,11 @@ void Writer::assignAddresses() {
     if (virtualSize > UINT32_MAX)
       Err(ctx) << "section larger than 4 GiB: " << sec->name;
     sec->header.VirtualSize = virtualSize;
+    // Flat images are mapped directly from the file, so their raw data must
+    // cover a trailing no-data (BSS) region that normal images can zero-fill.
+    if (config->align < 0x1000 &&
+        rawSize < alignTo(virtualSize, config->fileAlign))
+      rawSize = alignTo(virtualSize, config->fileAlign);
     sec->header.SizeOfRawData = rawSize;
     if (rawSize != 0)
       sec->header.PointerToRawData = fileSize;
