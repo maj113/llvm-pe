@@ -28,6 +28,16 @@ config.suffixes = [".ll", ".s", ".test", ".yaml", ".objtxt"]
 # subdirectories contain auxiliary inputs for various tests in their parent
 # directories.
 config.excludes = ["Inputs"]
+if not config.lld_enable_coff:
+    config.excludes.append("COFF")
+if not config.lld_enable_elf:
+    config.excludes.append("ELF")
+if not config.lld_enable_macho:
+    config.excludes.append("MachO")
+if not config.lld_enable_mingw:
+    config.excludes.append("MinGW")
+if not config.lld_enable_wasm:
+    config.excludes.append("wasm")
 
 # test_source_root: The root path where tests are located.
 config.test_source_root = os.path.dirname(__file__)
@@ -35,7 +45,7 @@ config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.lld_obj_root, "test")
 
 llvm_config.use_default_substitutions()
-llvm_config.use_lld()
+llvm_config.use_lld(required=False)
 config.substitutions.append(("%llvm_src_root", config.llvm_src_root))
 
 tool_patterns = [
