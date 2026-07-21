@@ -56,7 +56,7 @@ IMPORT-NEXT: }
 # RUN:   | FileCheck --check-prefix=NOBIND %s
 
 NOBIND:      Import {
-NOBIND-NEXT:   Name: std64.dll
+NOBIND-NEXT:   Name: std64
 NOBIND-NEXT:   ImportLookupTableRVA:{{$}}
 NOBIND-NEXT:   ImportAddressTableRVA: 0x{{[0-9A-F]+}}
 NOBIND-NEXT:   Symbol: ExitProcess (0)
