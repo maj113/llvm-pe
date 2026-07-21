@@ -179,8 +179,30 @@ endif()
 option(LLD_BUILD_TOOLS
   "Build the lld tools. If OFF, just generate build targets." ON)
 
+option(LLD_ENABLE_COFF "Build the COFF linker." ON)
+option(LLD_ENABLE_ELF "Build the ELF linker." ON)
+option(LLD_ENABLE_MACHO "Build the Mach-O linker." ON)
+option(LLD_ENABLE_MINGW "Build the MinGW linker." ON)
+option(LLD_ENABLE_WASM "Build the WebAssembly linker." ON)
+
+if(NOT LLD_ENABLE_COFF AND NOT LLD_ENABLE_ELF AND NOT LLD_ENABLE_MACHO AND
+   NOT LLD_ENABLE_MINGW AND NOT LLD_ENABLE_WASM)
+  message(FATAL_ERROR "At least one LLD driver must be enabled")
+endif()
+if(LLD_ENABLE_MINGW AND NOT LLD_ENABLE_COFF)
+  message(FATAL_ERROR "LLD_ENABLE_MINGW requires LLD_ENABLE_COFF")
+endif()
+
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/lld/Common/DriverConfig.h.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/include/lld/Common/DriverConfig.h)
+
 option(LLD_DEFAULT_LD_LLD_IS_MINGW
     "Use MinGW as the default backend for ld.lld. If OFF, ELF will be used." OFF)
+if(LLD_DEFAULT_LD_LLD_IS_MINGW AND NOT LLD_ENABLE_MINGW)
+  message(FATAL_ERROR
+    "LLD_DEFAULT_LD_LLD_IS_MINGW requires LLD_ENABLE_MINGW")
+endif()
 if (LLD_DEFAULT_LD_LLD_IS_MINGW)
   add_definitions("-DLLD_DEFAULT_LD_LLD_IS_MINGW=1")
 endif()
@@ -208,11 +230,21 @@ if (LLVM_INCLUDE_TESTS)
 endif()
 
 add_subdirectory(docs)
-add_subdirectory(COFF)
-add_subdirectory(ELF)
-add_subdirectory(MachO)
-add_subdirectory(MinGW)
-add_subdirectory(wasm)
+if(LLD_ENABLE_COFF)
+  add_subdirectory(COFF)
+endif()
+if(LLD_ENABLE_ELF)
+  add_subdirectory(ELF)
+endif()
+if(LLD_ENABLE_MACHO)
+  add_subdirectory(MachO)
+endif()
+if(LLD_ENABLE_MINGW)
+  add_subdirectory(MinGW)
+endif()
+if(LLD_ENABLE_WASM)
+  add_subdirectory(wasm)
+endif()
 
 add_custom_target(lld-headers)
 set_target_properties(lld-headers PROPERTIES FOLDER "Misc")
