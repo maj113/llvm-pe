@@ -756,19 +756,23 @@ function(find_python_module module)
   endif()
 endfunction()
 
-set (PYTHON_MODULES
-  pygments
-  # Some systems still don't have pygments.lexers.c_cpp which was introduced in
-  # version 2.0 in 2014...
-  pygments.lexers.c_cpp
-  yaml
-  )
-foreach(module ${PYTHON_MODULES})
-  find_python_module(${module})
-endforeach()
+if(Python3_Interpreter_FOUND)
+  set (PYTHON_MODULES
+    pygments
+    # Some systems still don't have pygments.lexers.c_cpp which was introduced in
+    # version 2.0 in 2014...
+    pygments.lexers.c_cpp
+    yaml
+    )
+  foreach(module ${PYTHON_MODULES})
+    find_python_module(${module})
+  endforeach()
 
-if(PY_PYGMENTS_FOUND AND PY_PYGMENTS_LEXERS_C_CPP_FOUND AND PY_YAML_FOUND)
-  set (LLVM_HAVE_OPT_VIEWER_MODULES 1)
+  if(PY_PYGMENTS_FOUND AND PY_PYGMENTS_LEXERS_C_CPP_FOUND AND PY_YAML_FOUND)
+    set (LLVM_HAVE_OPT_VIEWER_MODULES 1)
+  else()
+    set (LLVM_HAVE_OPT_VIEWER_MODULES 0)
+  endif()
 else()
   set (LLVM_HAVE_OPT_VIEWER_MODULES 0)
 endif()

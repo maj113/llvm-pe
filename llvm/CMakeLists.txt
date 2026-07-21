@@ -1087,8 +1087,13 @@ endif()
 
 # Find python before including config-ix, since it needs to be able to search
 # for python modules.
-find_package(Python3 ${LLVM_MINIMUM_PYTHON_VERSION} REQUIRED
-    COMPONENTS Interpreter)
+if(LLVM_INCLUDE_TESTS)
+  find_package(Python3 ${LLVM_MINIMUM_PYTHON_VERSION} REQUIRED
+      COMPONENTS Interpreter)
+else()
+  find_package(Python3 ${LLVM_MINIMUM_PYTHON_VERSION} QUIET
+      COMPONENTS Interpreter)
+endif()
 
 # All options referred to from HandleLLVMOptions have to be specified
 # BEFORE this include, otherwise options will not be correctly set on

@@ -1995,6 +1995,11 @@ endmacro()
 # contain symlinks are returned absolute.
 # Use with LLVM_LIT_PATH_FUNCTION below.
 function(make_paths_relative out_pathlist basedir pathlist)
+  if(NOT Python3_Interpreter_FOUND)
+    set(${out_pathlist} "${pathlist}" PARENT_SCOPE)
+    return()
+  endif()
+
   # Passing ARG_PATH_VALUES as-is to execute_process() makes cmake strip
   # empty list entries. So escape the ;s in the list and do the splitting
   # ourselves. cmake has no relpath function, so use Python for that.
