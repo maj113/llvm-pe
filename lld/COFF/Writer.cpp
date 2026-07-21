@@ -1873,6 +1873,14 @@ void Writer::assignAddresses() {
   }
   sizeOfImage = alignTo(rva, config->align);
 
+  // The Windows kernel probes a complete 64-bit NT header before respecting
+  // SizeOfOptionalHeader. Keep tiny flat images large enough for that probe and
+  // for their direct file mapping.
+  if (config->align < 0x1000) {
+    sizeOfImage = std::max<uint64_t>(sizeOfImage, dosStubSize + 0x108);
+    fileSize = std::max(fileSize, sizeOfImage);
+  }
+
   // Assign addresses to sections in MergeChunks.
   for (MergeChunk *mc : ctx.mergeChunkInstances)
     if (mc)
