@@ -51,13 +51,15 @@ IMPORT-NEXT: }
 # descriptor's lookup-table RVA is zero. Named and ordinal imports must still
 # be discoverable through the IAT.
 # RUN: lld-link /out:%t.nobind.exe /entry:main /subsystem:console \
-# RUN:   /allowbind:no %p/Inputs/hello64.obj %p/Inputs/std64.lib
-# RUN: llvm-readobj --coff-imports %t.nobind.exe \
+# RUN:   /allowbind:no /fixed /align:1 /filealign:1 /driver \
+# RUN:   %p/Inputs/hello64.obj %p/Inputs/std64.lib
+# RUN: llvm-readobj --file-headers --coff-imports %t.nobind.exe \
 # RUN:   | FileCheck --check-prefix=NOBIND %s
 
+NOBIND:      NumberOfRvaAndSize: 2
 NOBIND:      Import {
 NOBIND-NEXT:   Name: std64
-NOBIND-NEXT:   ImportLookupTableRVA:{{$}}
+NOBIND-NEXT:   ImportLookupTableRVA: 0x0
 NOBIND-NEXT:   ImportAddressTableRVA: 0x{{[0-9A-F]+}}
 NOBIND-NEXT:   Symbol: ExitProcess (0)
 NOBIND-NEXT:   Symbol:  (50)

@@ -235,6 +235,7 @@ private:
   void createECCodeMap();
   void finalizeAddresses();
   void removeEmptySections();
+  void computeNumDataDirectories();
   void assignOutputSectionIndices();
   void createSymbolAndStringTable();
   void openFile(StringRef outputPath);
@@ -313,6 +314,7 @@ private:
   uint32_t pointerToSymbolTable = 0;
   uint64_t sizeOfImage;
   uint64_t sizeOfHeaders;
+  uint32_t numDataDirectories = numberOfDataDirectory;
 
   uint32_t dosStubSize;
   uint32_t coffHeaderOffset;
@@ -791,6 +793,7 @@ void Writer::run() {
     createDynamicRelocs();
     removeUnusedSections();
     layoutSections();
+    computeNumDataDirectories();
     finalizeAddresses();
     removeEmptySections();
     assignOutputSectionIndices();
@@ -1490,6 +1493,45 @@ void Writer::removeEmptySections() {
   llvm::erase_if(ctx.outputSections, isEmpty);
 }
 
+void Writer::computeNumDataDirectories() {
+  if (ctx.config.align >= 0x1000) {
+    numDataDirectories = numberOfDataDirectory;
+    return;
+  }
+
+  // Keep only the prefix ending at the highest directory writeHeader() can
+  // populate. The checks are in directory-index order so later matches can
+  // raise the count without a separate maximum operation.
+  using namespace COFF;
+  SymbolTable &symtab =
+      ctx.config.machine == ARM64X ? *ctx.hybridSymtab : ctx.symtab;
+
+  numDataDirectories = 0;
+  if (symtab.edataStart)
+    numDataDirectories = EXPORT_TABLE + 1;
+  if (importTableStart)
+    numDataDirectories = IMPORT_TABLE + 1;
+  if (rsrcSec && rsrcSec->getVirtualSize())
+    numDataDirectories = RESOURCE_TABLE + 1;
+  ChunkRange &exceptionTable =
+      ctx.config.machine == ARM64EC ? hybridPdata : pdata;
+  if (exceptionTable.first)
+    numDataDirectories = EXCEPTION_TABLE + 1;
+  if (ctx.config.relocatable)
+    numDataDirectories = BASE_RELOCATION_TABLE + 1;
+  if (debugDirectory)
+    numDataDirectories = DEBUG_DIRECTORY + 1;
+  if (symtab.findUnderscore("_tls_used"))
+    numDataDirectories = TLS_TABLE + 1;
+  if (symtab.loadConfigSym)
+    numDataDirectories = LOAD_CONFIG_TABLE + 1;
+  if (iatStart && symtab.loadConfigSym &&
+      ctx.config.guardCF != GuardCFLevel::Off)
+    numDataDirectories = IAT + 1;
+  if (!delayIdata.empty())
+    numDataDirectories = DELAY_IMPORT_DESCRIPTOR + 1;
+}
+
 void Writer::assignOutputSectionIndices() {
   llvm::TimeTraceScope timeScope("Output sections indices");
   // Assign final output section indices, and assign each chunk to its output
@@ -1766,7 +1808,7 @@ void Writer::assignAddresses() {
   createECCodeMap();
 
   sizeOfHeaders = dosStubSize + sizeof(PEMagic) + sizeof(coff_file_header) +
-                  sizeof(data_directory) * numberOfDataDirectory +
+                  sizeof(data_directory) * numDataDirectories +
                   sizeof(coff_section) * ctx.outputSections.size();
   sizeOfHeaders +=
       config->is64() ? sizeof(pe32plus_header) : sizeof(pe32_header);
@@ -1900,7 +1942,7 @@ template <typename PEHeaderTy> void Writer::writeHeader() {
   if (config->swaprunNet)
     coff->Characteristics |= IMAGE_FILE_NET_RUN_FROM_SWAP;
   coff->SizeOfOptionalHeader =
-      sizeof(PEHeaderTy) + sizeof(data_directory) * numberOfDataDirectory;
+      sizeof(PEHeaderTy) + sizeof(data_directory) * numDataDirectories;
 
   // Write PE header
   assert(peHeaderOffset == static_cast<size_t>(buf - buffer->getBufferStart()));
@@ -1961,7 +2003,7 @@ template <typename PEHeaderTy> void Writer::writeHeader() {
     pe->DLLCharacteristics |= IMAGE_DLL_CHARACTERISTICS_NO_SEH;
   if (config->terminalServerAware)
     pe->DLLCharacteristics |= IMAGE_DLL_CHARACTERISTICS_TERMINAL_SERVER_AWARE;
-  pe->NumberOfRvaAndSize = numberOfDataDirectory;
+  pe->NumberOfRvaAndSize = numDataDirectories;
   if (textSec->getVirtualSize()) {
     pe->BaseOfCode = textSec->getRVA();
     pe->SizeOfCode = textSec->getRawSize();
@@ -1973,7 +2015,7 @@ template <typename PEHeaderTy> void Writer::writeHeader() {
          dataDirOffset64 ==
              static_cast<size_t>(buf - buffer->getBufferStart()));
   auto *dir = reinterpret_cast<data_directory *>(buf);
-  buf += sizeof(*dir) * numberOfDataDirectory;
+  buf += sizeof(*dir) * numDataDirectories;
   if (symtab.edataStart) {
     dir[EXPORT_TABLE].RelativeVirtualAddress = symtab.edataStart->getRVA();
     dir[EXPORT_TABLE].Size = symtab.edataEnd->getRVA() +
@@ -1984,7 +2026,7 @@ template <typename PEHeaderTy> void Writer::writeHeader() {
     dir[IMPORT_TABLE].RelativeVirtualAddress = importTableStart->getRVA();
     dir[IMPORT_TABLE].Size = importTableSize;
   }
-  if (iatStart) {
+  if (iatStart && numDataDirectories > IAT) {
     dir[IAT].RelativeVirtualAddress = iatStart->getRVA();
     dir[IAT].Size = iatSize;
   }
