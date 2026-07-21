@@ -11,6 +11,17 @@
 # RUN: llvm-objdump --no-print-imm-hex -d %t.exe | FileCheck --check-prefix=TEXT %s
 # RUN: llvm-readobj --coff-imports %t.exe | FileCheck -check-prefix=IMPORT %s
 
+# Flat images pack import thunks without the normal 16-byte branch-target
+# alignment. Verify that the three six-byte thunks are adjacent.
+# RUN: lld-link /out:%t.flat.exe /entry:main /align:1 /filealign:1 /driver \
+# RUN:   %p/Inputs/hello64.obj %p/Inputs/std64.lib
+# RUN: llvm-objdump --no-print-imm-hex -d %t.flat.exe \
+# RUN:   | FileCheck --check-prefix=FLAT %s
+
+FLAT:      jmpq
+FLAT-NEXT: jmpq
+FLAT-NEXT: jmpq
+
 TEXT: Disassembly of section .text:
 TEXT-EMPTY:
 TEXT-NEXT: <.text>:
