@@ -461,6 +461,7 @@ static bool isEligibleForMerging(Function &F) {
   return !F.isDeclaration() && !F.hasAvailableExternallyLinkage() &&
          !F.hasFnAttribute(Attribute::NoIPA) &&
          !F.hasFnAttribute("oracle-function") &&
+         !F.hasFnAttribute(Attribute::Naked) &&
          !hasDistinctMetadataIntrinsic(F);
 }
 
