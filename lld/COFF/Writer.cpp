@@ -948,7 +948,8 @@ void Writer::addSyntheticIdata() {
   // The loader assumes a specific order of data.
   // Add each type in the correct order.
   add(".idata$2", idata.dirs);
-  add(".idata$4", idata.lookups);
+  if (!idata.lookups.empty())
+    add(".idata$4", idata.lookups);
   add(".idata$5", idata.addresses);
   if (!idata.hints.empty())
     add(".idata$6", idata.hints);

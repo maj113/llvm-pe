@@ -117,7 +117,7 @@ public:
     memset(buf, 0, getSize());
 
     auto *e = (coff_import_directory_table_entry *)(buf);
-    e->ImportLookupTableRVA = lookupTab->getRVA();
+    e->ImportLookupTableRVA = lookupTab ? lookupTab->getRVA() : 0;
     e->NameRVA = dllName->getRVA();
     e->ImportAddressTableRVA = addressTab->getRVA();
   }
@@ -718,6 +718,7 @@ private:
 
 void IdataContents::create(COFFLinkerContext &ctx) {
   std::vector<std::vector<DefinedImportData *>> v = binImports(ctx, imports);
+  bool omitLookupTable = !ctx.config.allowBind && !isArm64EC(ctx.config.machine);
 
   // In hybrid images, EC and native code are usually very similar,
   // resulting in a highly similar set of imported symbols. Consequently,
@@ -782,20 +783,23 @@ void IdataContents::create(COFFLinkerContext &ctx) {
     // we need to create hintName chunks to store the names.
     // If they don't (if they are import-by-ordinals), we store only
     // ordinal values to the table.
-    size_t base = lookups.size();
+    size_t base = addresses.size();
     Chunk *lookupsTerminator = nullptr, *addressesTerminator = nullptr;
     uint32_t nativeOnly = 0;
     for (DefinedImportData *s : syms) {
       uint16_t ord = s->getOrdinal();
       HintNameChunk *hintChunk = nullptr;
-      Chunk *lookupsChunk, *addressesChunk;
+      Chunk *lookupsChunk = nullptr;
+      Chunk *addressesChunk;
 
       if (s->getExternalName().empty()) {
-        lookupsChunk = make<OrdinalOnlyChunk>(ctx, ord);
+        if (!omitLookupTable)
+          lookupsChunk = make<OrdinalOnlyChunk>(ctx, ord);
         addressesChunk = make<OrdinalOnlyChunk>(ctx, ord);
       } else {
         hintChunk = make<HintNameChunk>(s->getExternalName(), ord);
-        lookupsChunk = make<LookupChunk>(ctx, hintChunk);
+        if (!omitLookupTable)
+          lookupsChunk = make<LookupChunk>(ctx, hintChunk);
         addressesChunk = make<LookupChunk>(ctx, hintChunk);
         hints.push_back(hintChunk);
       }
@@ -830,7 +834,8 @@ void IdataContents::create(COFFLinkerContext &ctx) {
                                sizeof(uint64_t), addressesTerminator);
       }
 
-      lookups.push_back(lookupsChunk);
+      if (!omitLookupTable)
+        lookups.push_back(lookupsChunk);
       addresses.push_back(addressesChunk);
 
       if (s->file->isEC()) {
@@ -849,8 +854,9 @@ void IdataContents::create(COFFLinkerContext &ctx) {
       }
     }
     // Terminate with null values.
-    lookups.push_back(lookupsTerminator ? lookupsTerminator
-                                        : make<NullChunk>(ctx));
+    if (!omitLookupTable)
+      lookups.push_back(lookupsTerminator ? lookupsTerminator
+                                          : make<NullChunk>(ctx));
     addresses.push_back(addressesTerminator ? addressesTerminator
                                             : make<NullChunk>(ctx));
     if (ctx.symtab.isEC()) {
@@ -889,7 +895,7 @@ void IdataContents::create(COFFLinkerContext &ctx) {
       }
     }
 
-    dir->lookupTab = lookups[base];
+    dir->lookupTab = omitLookupTable ? nullptr : lookups[base];
     dir->addressTab = addresses[base];
     dirs.push_back(dir);
   }

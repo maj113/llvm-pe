@@ -47,6 +47,23 @@ IMPORT-NEXT:   Symbol:  (50)
 IMPORT-NEXT:   Symbol: MessageBoxA (1)
 IMPORT-NEXT: }
 
+# With binding disabled, the IAT doubles as the lookup table and the import
+# descriptor's lookup-table RVA is zero. Named and ordinal imports must still
+# be discoverable through the IAT.
+# RUN: lld-link /out:%t.nobind.exe /entry:main /subsystem:console \
+# RUN:   /allowbind:no %p/Inputs/hello64.obj %p/Inputs/std64.lib
+# RUN: llvm-readobj --coff-imports %t.nobind.exe \
+# RUN:   | FileCheck --check-prefix=NOBIND %s
+
+NOBIND:      Import {
+NOBIND-NEXT:   Name: std64.dll
+NOBIND-NEXT:   ImportLookupTableRVA:{{$}}
+NOBIND-NEXT:   ImportAddressTableRVA: 0x{{[0-9A-F]+}}
+NOBIND-NEXT:   Symbol: ExitProcess (0)
+NOBIND-NEXT:   Symbol:  (50)
+NOBIND-NEXT:   Symbol: MessageBoxA (1)
+NOBIND-NEXT: }
+
 # RUN: lld-link /out:%t.exe /entry:main /subsystem:console /merge:.rdata=.text \
 # RUN:   %p/Inputs/hello64.obj %p/Inputs/std64.lib /include:ExitProcess
 # RUN: llvm-readobj --coff-imports %t.exe | FileCheck -check-prefix=MERGE %s
