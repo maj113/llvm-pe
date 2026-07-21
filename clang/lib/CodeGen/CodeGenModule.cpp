@@ -7552,8 +7552,13 @@ GenerateStringLiteral(llvm::Constant *C, llvm::GlobalValue::LinkageTypes LT,
 ConstantAddress
 CodeGenModule::GetAddrOfConstantStringFromLiteral(const StringLiteral *S,
                                                   StringRef Name) {
-  CharUnits Alignment =
-      getContext().getAlignOfGlobalVarInChars(S->getType(), /*VD=*/nullptr);
+  // Microsoft 64-bit targets normally raise global alignment based on object
+  // size.  String literals have no ABI-visible alignment requirement, so under
+  // -Oz retain only their type alignment and avoid padding each literal.
+  CharUnits Alignment = getCodeGenOpts().OptimizeSize == 2
+                            ? getContext().getTypeAlignInChars(S->getType())
+                            : getContext().getAlignOfGlobalVarInChars(
+                                  S->getType(), /*VD=*/nullptr);
 
   llvm::Constant *C = GetConstantArrayFromStringLiteral(S);
   llvm::GlobalVariable **Entry = nullptr;
