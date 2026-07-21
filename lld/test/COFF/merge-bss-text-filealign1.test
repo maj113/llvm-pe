@@ -4,12 +4,19 @@
 # RUN: yaml2obj %s -o %t.obj
 # RUN: lld-link /out:%t.exe /entry:main /subsystem:console \
 # RUN:   /merge:.bss=.text /filealign:1 %t.obj
-# RUN: llvm-readobj --sections %t.exe | FileCheck %s
+# RUN: llvm-readobj --sections %t.exe | FileCheck --check-prefix=NORMAL %s
+# RUN: lld-link /out:%t.flat.exe /entry:main /subsystem:console /driver \
+# RUN:   /merge:.bss=.text /align:1 /filealign:1 %t.obj
+# RUN: llvm-readobj --sections %t.flat.exe | FileCheck --check-prefix=FLAT %s
 
-# CHECK:      Name: .text
-# CHECK-NEXT: VirtualSize: 0x104
-# CHECK:      RawDataSize:
-# CHECK-NOT:  Name: .bss
+# NORMAL:      Name: .text
+# NORMAL-NEXT: VirtualSize: 0x104
+# NORMAL:      RawDataSize: 1
+# NORMAL-NOT:  Name: .bss
+# FLAT:        Name: .text
+# FLAT-NEXT:   VirtualSize: 0x104
+# FLAT:        RawDataSize: 260
+# FLAT-NOT:    Name: .bss
 
 --- !COFF
 header:
