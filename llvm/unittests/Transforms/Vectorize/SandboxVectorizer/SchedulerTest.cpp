@@ -427,6 +427,50 @@ define void @foo(ptr noalias %ptr0, ptr noalias %ptr1, i8 %arg) {
   EXPECT_TRUE(Sched.trySchedule({L0, L1}));
 }
 
+// Top-down mirror of the TrimSchedule test. This exercises the top-down path of
+// Scheduler::trimSchedule(), where the ready list must be refilled by visiting
+// the nodes from the top of schedule down to the bottom of the DAG.
+TEST_F(SchedulerTest, TrimSchedule_TopDown) {
+  parseIR(C, R"IR(
+define void @foo(ptr noalias %ptr0, ptr noalias %ptr1, i8 %arg) {
+  %ld0 = load i8, ptr %ptr0
+  %ld1 = load i8, ptr %ptr1
+  %add0 = add i8 %ld0, %ld0
+  %add1 = add i8 %ld1, %ld1
+  store i8 %add0, ptr %ptr0
+  store i8 %add1, ptr %ptr1
+  %zext = zext i8 0 to i32
+  ret void
+}
+)IR");
+  llvm::Function *LLVMF = &*M->getFunction("foo");
+  sandboxir::Context Ctx(C);
+  auto *F = Ctx.createFunction(LLVMF);
+  auto *BB = &*F->begin();
+  auto It = BB->begin();
+  auto *L0 = cast<sandboxir::LoadInst>(&*It++);
+  auto *L1 = cast<sandboxir::LoadInst>(&*It++);
+  auto *Add0 = cast<sandboxir::BinaryOperator>(&*It++);
+  auto *Add1 = cast<sandboxir::BinaryOperator>(&*It++);
+  auto *S0 = cast<sandboxir::StoreInst>(&*It++);
+  auto *S1 = cast<sandboxir::StoreInst>(&*It++);
+  auto *Z = cast<sandboxir::CastInst>(&*It++);
+
+  sandboxir::Scheduler Sched(getAA(*LLVMF), Ctx,
+                             sandboxir::SchedDirection::TopDown);
+  EXPECT_TRUE(Sched.trySchedule({L0, L1}));
+  EXPECT_TRUE(Sched.trySchedule({S0, S1}));
+  // At this point Add0 and Add1 should have been individually scheduled
+  // as singleton bundles, but {L0,L1} and {S0,S1} as vector bundles.
+  // Check if rescheduling works.
+  EXPECT_TRUE(Sched.trySchedule({Add0, Add1}));
+  // These should fail because {S0,S1} is a vector bundle.
+  EXPECT_FALSE(Sched.trySchedule({S0, Z}));
+  EXPECT_FALSE(Sched.trySchedule({S1, Z}));
+  // This should succeed because it matches the original vec bundle.
+  EXPECT_TRUE(Sched.trySchedule({S0, S1}));
+}
+
 // Make sure that instructions in  SchedBundles are always scheduled
 // back-to-back
 TEST_F(SchedulerTest, SchedBundleBackToBack) {
