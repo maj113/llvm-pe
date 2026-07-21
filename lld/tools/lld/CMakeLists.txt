@@ -27,16 +27,39 @@ endfunction()
 lld_target_link_libraries(lld
   PRIVATE
   lldCommon
-  lldCOFF
-  lldELF
-  lldMachO
-  lldMinGW
-  lldWasm
   )
 
+if(LLD_ENABLE_COFF)
+  lld_target_link_libraries(lld PRIVATE lldCOFF)
+endif()
+if(LLD_ENABLE_ELF)
+  lld_target_link_libraries(lld PRIVATE lldELF)
+endif()
+if(LLD_ENABLE_MACHO)
+  lld_target_link_libraries(lld PRIVATE lldMachO)
+endif()
+if(LLD_ENABLE_MINGW)
+  lld_target_link_libraries(lld PRIVATE lldMinGW)
+endif()
+if(LLD_ENABLE_WASM)
+  lld_target_link_libraries(lld PRIVATE lldWasm)
+endif()
+
 if(NOT LLD_SYMLINKS_TO_CREATE)
-  set(LLD_SYMLINKS_TO_CREATE
-      lld-link ld.lld ld64.lld wasm-ld)
+  set(LLD_SYMLINKS_TO_CREATE)
+  if(LLD_ENABLE_COFF)
+    list(APPEND LLD_SYMLINKS_TO_CREATE lld-link)
+  endif()
+  if(LLD_ENABLE_ELF OR
+     (LLD_ENABLE_MINGW AND LLD_DEFAULT_LD_LLD_IS_MINGW))
+    list(APPEND LLD_SYMLINKS_TO_CREATE ld.lld)
+  endif()
+  if(LLD_ENABLE_MACHO)
+    list(APPEND LLD_SYMLINKS_TO_CREATE ld64.lld)
+  endif()
+  if(LLD_ENABLE_WASM)
+    list(APPEND LLD_SYMLINKS_TO_CREATE wasm-ld)
+  endif()
 endif()
 
 foreach(link ${LLD_SYMLINKS_TO_CREATE})

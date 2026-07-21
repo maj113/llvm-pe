@@ -26,6 +26,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "lld/Common/Driver.h"
+#include "lld/Common/DriverConfig.h"
 #include "lld/Common/ErrorHandler.h"
 #include "lld/Common/Memory.h"
 #include "llvm/ADT/STLExtras.h"
@@ -66,11 +67,39 @@ static unsigned inTestVerbosity() {
   return v;
 }
 
+#if LLD_ENABLE_COFF
 LLD_HAS_DRIVER(coff)
+#endif
+#if LLD_ENABLE_ELF
 LLD_HAS_DRIVER(elf)
+#endif
+#if LLD_ENABLE_MINGW
 LLD_HAS_DRIVER(mingw)
+#endif
+#if LLD_ENABLE_MACHO
 LLD_HAS_DRIVER(macho)
+#endif
+#if LLD_ENABLE_WASM
 LLD_HAS_DRIVER(wasm)
+#endif
+
+static constexpr DriverDef lldDrivers[] = {
+#if LLD_ENABLE_COFF
+  {lld::WinLink, &lld::coff::link},
+#endif
+#if LLD_ENABLE_ELF
+  {lld::Gnu, &lld::elf::link},
+#endif
+#if LLD_ENABLE_MINGW
+  {lld::MinGW, &lld::mingw::link},
+#endif
+#if LLD_ENABLE_MACHO
+  {lld::Darwin, &lld::macho::link},
+#endif
+#if LLD_ENABLE_WASM
+  {lld::Wasm, &lld::wasm::link},
+#endif
+};
 
 int lld_main(int argc, char **argv, const llvm::ToolContext &) {
   sys::Process::UseANSIEscapeCodes(true);
@@ -86,9 +115,8 @@ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
   // Not running in lit tests, just take the shortest codepath with global
   // exception handling and no memory cleanup on exit.
   if (!inTestVerbosity()) {
-    int r =
-        lld::unsafeLldMain(args, llvm::outs(), llvm::errs(), LLD_ALL_DRIVERS,
-                           /*exitEarly=*/true);
+    int r = lld::unsafeLldMain(args, llvm::outs(), llvm::errs(), lldDrivers,
+                               /*exitEarly=*/true);
     return r;
   }
 
@@ -100,7 +128,7 @@ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
     inTestOutputDisabled = (i != 1);
 
     // Execute one iteration.
-    auto r = lldMain(args, llvm::outs(), llvm::errs(), LLD_ALL_DRIVERS);
+    auto r = lldMain(args, llvm::outs(), llvm::errs(), lldDrivers);
     if (!r.canRunAgain)
       exitLld(r.retCode); // Exit now, can't re-execute again.
 

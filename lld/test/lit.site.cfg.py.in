@@ -27,6 +27,11 @@ config.build_examples = @LLVM_BUILD_EXAMPLES@
 config.has_plugins = @LLVM_ENABLE_PLUGINS@
 config.linked_bye_extension = @LLVM_BYE_LINK_INTO_TOOLS@
 config.enable_threads = @LLVM_ENABLE_THREADS@
+config.lld_enable_coff = @LLD_ENABLE_COFF@
+config.lld_enable_elf = @LLD_ENABLE_ELF@
+config.lld_enable_macho = @LLD_ENABLE_MACHO@
+config.lld_enable_mingw = @LLD_ENABLE_MINGW@
+config.lld_enable_wasm = @LLD_ENABLE_WASM@
 
 import lit.llvm
 lit.llvm.initialize(lit_config, config)
