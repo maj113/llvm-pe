@@ -588,12 +588,29 @@ MLIR_CAPI_EXPORTED MlirTypeConverter mlirTypeConverterCreate(void);
 MLIR_CAPI_EXPORTED void
 mlirTypeConverterDestroy(MlirTypeConverter typeConverter);
 
-/// Callback type for type conversion functions.
-/// Returns failure or sets convertedType to MlirType{NULL} to indicate failure.
-/// If failure is returned, the converter is allowed to try another
-/// conversion function to perform the conversion.
-typedef MlirLogicalResult (*MlirTypeConverterConversionCallback)(
-    MlirType type, MlirType *convertedType, void *userData);
+/// Outcome of a type conversion callback. Mirrors the three states of the
+/// underlying C++ `std::optional<LogicalResult>` conversion result.
+typedef enum MlirTypeConverterConversionStatus {
+  /// The type was converted successfully.
+  MlirTypeConverterConversionStatusSuccess = 0,
+  /// The conversion failed; no further conversion function will be tried.
+  MlirTypeConverterConversionStatusFailure = 1,
+  /// The conversion was declined; another registered conversion function may be
+  /// tried.
+  MlirTypeConverterConversionStatusDeclined = 2,
+} MlirTypeConverterConversionStatus;
+
+/// Callback type for type conversion functions. On success the callback sets
+/// `*convertedType` to the converted type and returns
+/// MlirTypeConverterConversionStatusSuccess. Returning
+/// MlirTypeConverterConversionStatusDeclined leaves the type unconverted and
+/// allows another registered conversion function to be tried; returning
+/// MlirTypeConverterConversionStatusFailure fails the conversion without trying
+/// any further function.
+typedef MlirTypeConverterConversionStatus (
+    *MlirTypeConverterConversionCallback)(MlirType type,
+                                          MlirType *convertedType,
+                                          void *userData);
 
 /// Add a type conversion function to the given TypeConverter.
 MLIR_CAPI_EXPORTED void

@@ -652,15 +652,24 @@ void mlirTypeConverterAddConversion(
     MlirTypeConverterConversionCallback convertType, void *userData) {
   unwrap(typeConverter)
       ->addConversion(
-          [convertType, userData](Type type) -> std::optional<Type> {
+          [convertType, userData](Type type, SmallVectorImpl<Type> &results)
+              -> std::optional<LogicalResult> {
             MlirType converted{nullptr};
-            MlirLogicalResult result =
+            MlirTypeConverterConversionStatus status =
                 convertType(wrap(type), &converted, userData);
-            if (mlirLogicalResultIsFailure(result))
-              return std::nullopt; // allowed to try another conversion function
-            if (mlirTypeIsNull(converted))
-              return nullptr;
-            return unwrap(converted);
+            switch (status) {
+            case MlirTypeConverterConversionStatusSuccess:
+              results.push_back(unwrap(converted));
+              return success();
+            case MlirTypeConverterConversionStatusFailure:
+              // Failure: fail the conversion without trying another
+              // registered conversion function.
+              return failure();
+            case MlirTypeConverterConversionStatusDeclined:
+              // Declined: allow the driver to try another conversion function.
+              return std::nullopt;
+            }
+            llvm_unreachable("unknown MlirTypeConverterConversionStatus");
           });
 }
 

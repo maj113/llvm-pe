@@ -804,19 +804,40 @@ void testConversionTargetDynamicLegality(MlirContext ctx) {
 
 // Type conversion callback: maps i32 -> i64 and leaves every other type
 // unchanged (identity). Used by the materialization tests below.
-static MlirLogicalResult widenI32ToI64(MlirType type, MlirType *result,
-                                       void *userData) {
+static MlirTypeConverterConversionStatus
+widenI32ToI64(MlirType type, MlirType *result, void *userData) {
   (void)userData;
   if (mlirTypeIsAInteger(type) && mlirIntegerTypeGetWidth(type) == 32)
     *result = mlirIntegerTypeGet(mlirTypeGetContext(type), 64);
   else
     *result = type;
-  return mlirLogicalResultSuccess();
+  return MlirTypeConverterConversionStatusSuccess;
 }
 
-// Materialization callback: builds a `test.cast` op that produces a single
-// value of `outputType` from the given inputs, and records that it ran by
-// bumping the counter passed as userData.
+// Type conversion callback that declines i32 (returns Declined) and is the
+// identity on every other type. A declining callback lets the converter fall
+// through to another registered conversion function.
+static MlirTypeConverterConversionStatus
+declineI32(MlirType type, MlirType *result, void *userData) {
+  (void)userData;
+  if (mlirTypeIsAInteger(type) && mlirIntegerTypeGetWidth(type) == 32)
+    return MlirTypeConverterConversionStatusDeclined;
+  *result = type;
+  return MlirTypeConverterConversionStatusSuccess;
+}
+
+// Type conversion callback that fails on i32 (returns Failure) and is the
+// identity on every other type. A failure aborts the conversion without
+// trying any earlier-registered conversion function.
+static MlirTypeConverterConversionStatus
+failI32(MlirType type, MlirType *result, void *userData) {
+  (void)userData;
+  if (mlirTypeIsAInteger(type) && mlirIntegerTypeGetWidth(type) == 32)
+    return MlirTypeConverterConversionStatusFailure;
+  *result = type;
+  return MlirTypeConverterConversionStatusSuccess;
+}
+
 static MlirValue buildCastMaterialization(MlirRewriterBase rewriter,
                                           MlirType outputType, intptr_t nInputs,
                                           MlirValue *inputs, MlirLocation loc,
@@ -1019,6 +1040,50 @@ void testTypeConverterTargetMaterialization(MlirContext ctx) {
   fprintf(stderr, "testTypeConverterTargetMaterialization: PASSED\n");
 }
 
+// Unit test for the three MlirTypeConverterConversionStatus values, exercised
+// directly through mlirTypeConverterConvertType (no conversion driver needed).
+// Conversion functions are consulted most-recently-registered first, so the
+// second-registered callback is tried before the first (`widenI32ToI64`).
+void testTypeConverterConversionStatus(MlirContext ctx) {
+  // CHECK-LABEL: @testTypeConverterConversionStatus
+  fprintf(stderr, "@testTypeConverterConversionStatus\n");
+
+  MlirType i32 = mlirIntegerTypeGet(ctx, 32);
+  MlirType i64 = mlirIntegerTypeGet(ctx, 64);
+
+  // Success: the sole conversion widens i32 -> i64.
+  MlirTypeConverter success = mlirTypeConverterCreate();
+  mlirTypeConverterAddConversion(success, widenI32ToI64, NULL);
+  MlirType successResult = mlirTypeConverterConvertType(success, i32);
+  assert(!mlirTypeIsNull(successResult) && mlirTypeEqual(successResult, i64) &&
+         "Success must yield the converted type");
+  mlirTypeConverterDestroy(success);
+
+  // Declined: `declineI32` is tried first and declines, so the converter falls
+  // through to `widenI32ToI64`, which converts i32 -> i64.
+  MlirTypeConverter declined = mlirTypeConverterCreate();
+  mlirTypeConverterAddConversion(declined, widenI32ToI64, NULL);
+  mlirTypeConverterAddConversion(declined, declineI32, NULL);
+  MlirType declinedResult = mlirTypeConverterConvertType(declined, i32);
+  assert(!mlirTypeIsNull(declinedResult) &&
+         mlirTypeEqual(declinedResult, i64) &&
+         "Declined must fall through to the next conversion function");
+  mlirTypeConverterDestroy(declined);
+
+  // Failure: `failI32` is tried first and fails, which aborts the
+  // conversion without consulting `widenI32ToI64`; convertType returns null.
+  MlirTypeConverter failure = mlirTypeConverterCreate();
+  mlirTypeConverterAddConversion(failure, widenI32ToI64, NULL);
+  mlirTypeConverterAddConversion(failure, failI32, NULL);
+  MlirType failureResult = mlirTypeConverterConvertType(failure, i32);
+  assert(mlirTypeIsNull(failureResult) &&
+         "Failure must abort without trying another conversion function");
+  mlirTypeConverterDestroy(failure);
+
+  // CHECK: testTypeConverterConversionStatus: PASSED
+  fprintf(stderr, "testTypeConverterConversionStatus: PASSED\n");
+}
+
 int main(void) {
   MlirContext ctx = mlirContextCreate();
   mlirContextSetAllowUnregisteredDialects(ctx, true);
@@ -1037,6 +1102,7 @@ int main(void) {
   testConversionTargetDynamicLegality(ctx);
   testTypeConverterSourceMaterialization(ctx);
   testTypeConverterTargetMaterialization(ctx);
+  testTypeConverterConversionStatus(ctx);
 
   mlirContextDestroy(ctx);
   return 0;
