@@ -1668,9 +1668,12 @@ TEST(TripleTest, DefaultFloatABI) {
   EXPECT_EQ(FloatABI::Soft,
             Triple("mips-unknown-freebsd").getDefaultFloatABI());
 
-  // CSKY defaults to soft float.
+  // Defaults to soft float.
+  EXPECT_EQ(FloatABI::Soft, Triple("avr-unknown-unknown").getDefaultFloatABI());
   EXPECT_EQ(FloatABI::Soft,
             Triple("csky-unknown-linux-gnu").getDefaultFloatABI());
+  EXPECT_EQ(FloatABI::Soft,
+            Triple("msp430-unknown-unknown").getDefaultFloatABI());
 
   // Targets without a special case default to hard float.
   EXPECT_EQ(FloatABI::Hard,

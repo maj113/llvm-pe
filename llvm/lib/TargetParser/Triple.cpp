@@ -2574,7 +2574,7 @@ FloatABI::ABIType Triple::getDefaultFloatABI() const {
   if (isMIPS())
     return isOSFreeBSD() ? FloatABI::Soft : FloatABI::Hard;
 
-  if (isCSKY())
+  if (isCSKY() || isAVR() || getArch() == msp430)
     return FloatABI::Soft;
 
   // Most targets use hard float unless soft float is explicitly requested.
