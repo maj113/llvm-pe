@@ -1446,7 +1446,7 @@ void Writer::removeUnusedSections() {
   // Remove sections that we can be sure won't get content, to avoid
   // allocating space for their section headers.
   auto isUnused = [this](OutputSection *s) {
-    if (s == relocSec)
+    if (s == relocSec && ctx.config.relocatable)
       return false; // This section is populated later.
     // MergeChunks have zero size at this point, as their size is finalized
     // later. Only remove sections that have no Chunks at all.
