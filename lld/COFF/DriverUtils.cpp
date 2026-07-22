@@ -149,8 +149,8 @@ void LinkerDriver::parseMerge(StringRef s) {
   auto [from, to] = s.split('=');
   if (from.empty() || to.empty())
     Fatal(ctx) << "/merge: invalid argument: " << s;
-  if (from == ".rsrc" || to == ".rsrc")
-    Fatal(ctx) << "/merge: cannot merge '.rsrc' with any section";
+  if (to == ".rsrc")
+    Fatal(ctx) << "/merge: cannot merge any section into '.rsrc'";
   if (from == ".reloc" || to == ".reloc")
     Fatal(ctx) << "/merge: cannot merge '.reloc' with any section";
   auto pair = ctx.config.merge.insert(std::make_pair(from, to));

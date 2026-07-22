@@ -15,6 +15,12 @@
 # RUN: llvm-readobj --file-headers --coff-resources %t/resource.exe \
 # RUN:   | FileCheck --check-prefix=RESOURCE %s
 # RUN: lld-link /entry:main /fixed /driver /align:1 /filealign:1 \
+# RUN:   /merge:.rsrc=.data /out:%t/resource-merged.exe %t/plain.obj \
+# RUN:   %t/resource.obj
+# RUN: llvm-readobj --file-headers --sections %t/resource-merged.exe \
+# RUN:   | FileCheck --check-prefix=RESOURCE-MERGED \
+# RUN:       --implicit-check-not='Name: .rsrc' %s
+# RUN: lld-link /entry:main /fixed /driver /align:1 /filealign:1 \
 # RUN:   /export:main /out:%t/export.exe %t/plain.obj
 # RUN: llvm-readobj --file-headers %t/export.exe | FileCheck --check-prefix=EXPORT %s
 # RUN: lld-link /entry:main /driver /align:1 /filealign:1 \
@@ -48,6 +54,9 @@
 # RESOURCE: NumberOfRvaAndSize: 3
 # RESOURCE: ResourceTableRVA: 0x{{[1-9A-F][0-9A-F]*}}
 # RESOURCE: Total Number of Resources: 1
+# RESOURCE-MERGED: SectionCount: 2
+# RESOURCE-MERGED: NumberOfRvaAndSize: 3
+# RESOURCE-MERGED: ResourceTableRVA: 0x{{[1-9A-F][0-9A-F]*}}
 # EXPORT: NumberOfRvaAndSize: 1
 # PDATA:  NumberOfRvaAndSize: 4
 # RELOC:  NumberOfRvaAndSize: 6
@@ -62,6 +71,9 @@
 .globl main
 main:
   retq
+
+.data
+.long 0
 
 #--- pdata.s
 .section .pdata,"dr"

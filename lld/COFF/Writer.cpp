@@ -352,6 +352,11 @@ private:
   // files, so we need to keep track of them separately.
   ChunkRange pdata;
 
+  // The range of .rsrc chunks in the output file. Keep this independently of
+  // rsrcSec so the resource directory remains valid when /merge moves the
+  // chunks into another output section.
+  ChunkRange rsrc;
+
   // x86_64 .pdata sections on ARM64EC/ARM64X targets.
   ChunkRange hybridPdata;
 
@@ -1511,7 +1516,7 @@ void Writer::computeNumDataDirectories() {
     numDataDirectories = EXPORT_TABLE + 1;
   if (importTableStart)
     numDataDirectories = IMPORT_TABLE + 1;
-  if (!rsrcSec->chunks.empty())
+  if (rsrc.first)
     numDataDirectories = RESOURCE_TABLE + 1;
   ChunkRange &exceptionTable =
       ctx.config.machine == ARM64EC ? hybridPdata : pdata;
@@ -1733,6 +1738,11 @@ void Writer::mergeSection(const std::map<StringRef, StringRef>::value_type &p) {
 
 void Writer::mergeSections() {
   llvm::TimeTraceScope timeScope("Merge sections");
+  if (!rsrcSec->chunks.empty()) {
+    rsrc.first = rsrcSec->chunks.front();
+    rsrc.last = rsrcSec->chunks.back();
+  }
+
   if (!pdataSec->chunks.empty()) {
     if (isArm64EC(ctx.config.machine)) {
       // On ARM64EC .pdata may contain both ARM64 and X64 data. Split them by
@@ -2043,9 +2053,10 @@ template <typename PEHeaderTy> void Writer::writeHeader() {
     dir[IAT].RelativeVirtualAddress = iatStart->getRVA();
     dir[IAT].Size = iatSize;
   }
-  if (rsrcSec->getVirtualSize()) {
-    dir[RESOURCE_TABLE].RelativeVirtualAddress = rsrcSec->getRVA();
-    dir[RESOURCE_TABLE].Size = rsrcSec->getVirtualSize();
+  if (rsrc.first) {
+    dir[RESOURCE_TABLE].RelativeVirtualAddress = rsrc.first->getRVA();
+    dir[RESOURCE_TABLE].Size =
+        rsrc.last->getRVA() + rsrc.last->getSize() - rsrc.first->getRVA();
   }
   // ARM64EC (but not ARM64X) contains x86_64 exception table in data directory.
   ChunkRange &exceptionTable =
