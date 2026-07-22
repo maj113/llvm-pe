@@ -5,10 +5,15 @@
 # RUN: llvm-mc -filetype=obj -triple=x86_64-windows %t/pdata.s -o %t/pdata.obj
 # RUN: llvm-mc -filetype=obj -triple=x86_64-windows %t/tls.s -o %t/tls.obj
 # RUN: llvm-mc -filetype=obj -triple=x86_64-windows %t/load.s -o %t/load.obj
+# RUN: llvm-cvtres /machine:x64 /out:%t/resource.obj %p/Inputs/resource.res
 
 # RUN: lld-link /entry:main /fixed /driver /align:1 /filealign:1 \
 # RUN:   /out:%t/none.exe %t/plain.obj
 # RUN: llvm-readobj --file-headers %t/none.exe | FileCheck --check-prefix=NONE %s
+# RUN: lld-link /entry:main /fixed /driver /align:1 /filealign:1 \
+# RUN:   /out:%t/resource.exe %t/plain.obj %t/resource.obj
+# RUN: llvm-readobj --file-headers --coff-resources %t/resource.exe \
+# RUN:   | FileCheck --check-prefix=RESOURCE %s
 # RUN: lld-link /entry:main /fixed /driver /align:1 /filealign:1 \
 # RUN:   /export:main /out:%t/export.exe %t/plain.obj
 # RUN: llvm-readobj --file-headers %t/export.exe | FileCheck --check-prefix=EXPORT %s
@@ -40,6 +45,9 @@
 # RUN:   | FileCheck --check-prefix=DELAY %s
 
 # NONE:   NumberOfRvaAndSize: 0
+# RESOURCE: NumberOfRvaAndSize: 3
+# RESOURCE: ResourceTableRVA: 0x{{[1-9A-F][0-9A-F]*}}
+# RESOURCE: Total Number of Resources: 1
 # EXPORT: NumberOfRvaAndSize: 1
 # PDATA:  NumberOfRvaAndSize: 4
 # RELOC:  NumberOfRvaAndSize: 6
