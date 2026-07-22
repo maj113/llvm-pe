@@ -1511,7 +1511,7 @@ void Writer::computeNumDataDirectories() {
     numDataDirectories = EXPORT_TABLE + 1;
   if (importTableStart)
     numDataDirectories = IMPORT_TABLE + 1;
-  if (rsrcSec && rsrcSec->getVirtualSize())
+  if (!rsrcSec->chunks.empty())
     numDataDirectories = RESOURCE_TABLE + 1;
   ChunkRange &exceptionTable =
       ctx.config.machine == ARM64EC ? hybridPdata : pdata;
