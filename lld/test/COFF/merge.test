@@ -8,8 +8,6 @@
 # RUN: llvm-readobj --sections %t.exe | FileCheck --check-prefix=CHECK2 %s
 
 # RUN: env LLD_IN_TEST=1 not lld-link /out:%t.exe /entry:main /subsystem:console /force \
-# RUN:   /merge:.rsrc=.foo %t.obj /debug 2>&1 | FileCheck --check-prefix=NO-RSRC %s
-# RUN: env LLD_IN_TEST=1 not lld-link /out:%t.exe /entry:main /subsystem:console /force \
 # RUN:   /merge:.foo=.rsrc %t.obj /debug 2>&1 | FileCheck --check-prefix=NO-RSRC %s
 # RUN: env LLD_IN_TEST=1 not lld-link /out:%t.exe /entry:main /subsystem:console /force \
 # RUN:   /merge:.reloc=.foo %t.obj /debug 2>&1 | FileCheck --check-prefix=NO-RELOC %s
@@ -27,7 +25,7 @@
 # CHECK2: Name: .abc
 # CHECK2-NOT: Name: .bar
 
-# NO-RSRC: /merge: cannot merge '.rsrc' with any section
+# NO-RSRC: /merge: cannot merge any section into '.rsrc'
 # NO-RELOC: /merge: cannot merge '.reloc' with any section
 
 # NO-CYCLE: /merge: cycle found for section '.foo'
