@@ -45,6 +45,9 @@ class LLVM_LIBRARY_VISIBILITY WinException : public EHStreamer {
   /// Pointer to the current funclet entry BB.
   const MachineBasicBlock *CurrentFuncletEntry = nullptr;
 
+  /// Whether the current funclet has an emitted language handler.
+  bool CurrentFuncletHasHandler = false;
+
   /// The section of the last funclet start.
   MCSection *CurrentFuncletTextSection = nullptr;
 
@@ -61,6 +64,9 @@ class LLVM_LIBRARY_VISIBILITY WinException : public EHStreamer {
   /// the __CxxFrameHandler3 personality.
   void emitCXXFrameHandler3Table(const MachineFunction *MF);
 
+  /// Emit compact __CxxFrameHandler4 metadata.
+  void emitCXXFrameHandler4Table(const MachineFunction *MF);
+
   /// Emit the EH table data for _except_handler3 and _except_handler4
   /// personality functions. These are only used on 32-bit and do not use CFI
   /// tables.
@@ -71,6 +77,11 @@ class LLVM_LIBRARY_VISIBILITY WinException : public EHStreamer {
   void computeIP2StateTable(
       const MachineFunction *MF, const WinEHFuncInfo &FuncInfo,
       SmallVectorImpl<std::pair<const MCExpr *, int>> &IPToStateTable);
+
+  void computeIP2StateTableForFunclet(
+      const MachineFunction *MF, const WinEHFuncInfo &FuncInfo,
+      const MachineBasicBlock *FuncletStart,
+      SmallVectorImpl<std::pair<const MCSymbol *, int>> &IPToStateTable);
 
   /// Emits the label used with llvm.eh.recoverfp, which is used by
   /// outlined funclets.
