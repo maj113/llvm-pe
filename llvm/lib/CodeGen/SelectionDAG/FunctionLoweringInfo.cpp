@@ -107,8 +107,11 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
 
   // If this personality uses funclets, we need to do a bit more work.
   DenseMap<const AllocaInst *, TinyPtrVector<int *>> CatchObjects;
+  DenseMap<const AllocaInst *, TinyPtrVector<int *>> FH4UnwindObjects;
   EHPersonality Personality = classifyEHPersonality(
       Fn->hasPersonalityFn() ? Fn->getPersonalityFn() : nullptr);
+  bool IsMSVCXXEH4 =
+      Fn->hasPersonalityFn() && isMSVCXXEH4Personality(Fn->getPersonalityFn());
   if (isFuncletEHPersonality(Personality)) {
     // Calculate state numbers if we haven't already.
     WinEHFuncInfo &EHInfo = *MF->getWinEHFuncInfo();
@@ -126,6 +129,19 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
           CatchObjects[AI].push_back(&H.CatchObj.FrameIndex);
         else
           H.CatchObj.FrameIndex = INT_MAX;
+      }
+    }
+    if (IsMSVCXXEH4) {
+      for (CxxUnwindMapEntry &UME : EHInfo.CxxUnwindMap)
+        if (UME.Type == CxxUnwindMapEntry::ActionType::DtorWithObj ||
+            UME.Type == CxxUnwindMapEntry::ActionType::DtorWithPtrToObj)
+          FH4UnwindObjects[UME.Object.Alloca].push_back(&UME.Object.FrameIndex);
+      for (CxxUnwindMapEntry4Override &Override :
+           EHInfo.CxxUnwindMap4Overrides) {
+        CxxUnwindMapEntry &UME = Override.Entry;
+        if (UME.Type == CxxUnwindMapEntry::ActionType::DtorWithObj ||
+            UME.Type == CxxUnwindMapEntry::ActionType::DtorWithPtrToObj)
+          FH4UnwindObjects[UME.Object.Alloca].push_back(&UME.Object.FrameIndex);
       }
     }
   }
@@ -173,6 +189,10 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
             for (int *CatchObjPtr : Iter->second)
               *CatchObjPtr = FrameIndex;
           }
+          if (auto UnwindIter = FH4UnwindObjects.find(AI);
+              UnwindIter != FH4UnwindObjects.end())
+            for (int *UnwindObjPtr : UnwindIter->second)
+              *UnwindObjPtr = FrameIndex;
         } else {
           // FIXME: Overaligned static allocas should be grouped into
           // a single dynamic allocation instead of using a separate
@@ -324,14 +344,31 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
 
     // Map all BB references in the WinEH data to MBBs.
     for (WinEHTryBlockMapEntry &TBME : EHInfo.TryBlockMap) {
+      if (IsMSVCXXEH4 && TBME.Owner)
+        TBME.Owner = getMBB(cast<const BasicBlock *>(TBME.Owner));
       for (WinEHHandlerType &H : TBME.HandlerArray) {
         if (H.Handler)
           H.Handler = getMBB(cast<const BasicBlock *>(H.Handler));
+        if (IsMSVCXXEH4)
+          for (MBBOrBasicBlock &Continuation : H.Continuations)
+            Continuation = getMBB(cast<const BasicBlock *>(Continuation));
       }
     }
-    for (CxxUnwindMapEntry &UME : EHInfo.CxxUnwindMap)
+    for (CxxUnwindMapEntry &UME : EHInfo.CxxUnwindMap) {
+      if (IsMSVCXXEH4 && UME.Owner)
+        UME.Owner = getMBB(cast<const BasicBlock *>(UME.Owner));
       if (UME.Cleanup)
         UME.Cleanup = getMBB(cast<const BasicBlock *>(UME.Cleanup));
+    }
+    if (IsMSVCXXEH4)
+      for (CxxUnwindMapEntry4Override &Override :
+           EHInfo.CxxUnwindMap4Overrides) {
+        CxxUnwindMapEntry &UME = Override.Entry;
+        if (UME.Owner)
+          UME.Owner = getMBB(cast<const BasicBlock *>(UME.Owner));
+        if (UME.Cleanup)
+          UME.Cleanup = getMBB(cast<const BasicBlock *>(UME.Cleanup));
+      }
     for (SEHUnwindMapEntry &UME : EHInfo.SEHUnwindMap)
       UME.Handler = getMBB(cast<const BasicBlock *>(UME.Handler));
     for (ClrEHUnwindMapEntry &CME : EHInfo.ClrEHUnwindMap)

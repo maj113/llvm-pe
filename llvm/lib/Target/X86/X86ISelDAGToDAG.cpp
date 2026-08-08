@@ -15,12 +15,15 @@
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
 #include "X86TargetMachine.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
+#include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/ConstantRange.h"
+#include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -41,6 +44,68 @@ using namespace llvm;
 
 STATISTIC(NumLoadMoved, "Number of loads moved below TokenFactor");
 
+static bool removeFH4DirectCleanupFunclets(MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  if (!F.hasPersonalityFn() || !isMSVCXXEH4Personality(F.getPersonalityFn()))
+    return false;
+
+  WinEHFuncInfo *EHInfo = MF.getWinEHFuncInfo();
+  SmallVector<MachineBasicBlock *, 2> DirectCleanups;
+  for (CxxUnwindMapEntry &UME : EHInfo->CxxUnwindMap) {
+    if (UME.Type != CxxUnwindMapEntry::ActionType::DtorWithObj &&
+        UME.Type != CxxUnwindMapEntry::ActionType::DtorWithPtrToObj)
+      continue;
+    MachineBasicBlock *Cleanup = cast<MachineBasicBlock *>(UME.Cleanup);
+    if (!llvm::is_contained(DirectCleanups, Cleanup))
+      DirectCleanups.push_back(Cleanup);
+  }
+  for (CxxUnwindMapEntry4Override &Override : EHInfo->CxxUnwindMap4Overrides) {
+    CxxUnwindMapEntry &UME = Override.Entry;
+    if (UME.Type != CxxUnwindMapEntry::ActionType::DtorWithObj &&
+        UME.Type != CxxUnwindMapEntry::ActionType::DtorWithPtrToObj)
+      continue;
+    MachineBasicBlock *Cleanup = cast<MachineBasicBlock *>(UME.Cleanup);
+    if (!llvm::is_contained(DirectCleanups, Cleanup))
+      DirectCleanups.push_back(Cleanup);
+  }
+
+  bool Changed = false;
+  for (MachineBasicBlock *Cleanup : DirectCleanups) {
+    bool HasFallbackReference =
+        llvm::any_of(EHInfo->CxxUnwindMap, [&](const CxxUnwindMapEntry &UME) {
+          return UME.Cleanup &&
+                 cast<MachineBasicBlock *>(UME.Cleanup) == Cleanup &&
+                 UME.Type == CxxUnwindMapEntry::ActionType::Cleanup;
+        });
+    HasFallbackReference |= llvm::any_of(
+        EHInfo->CxxUnwindMap4Overrides,
+        [&](const CxxUnwindMapEntry4Override &Override) {
+          const CxxUnwindMapEntry &UME = Override.Entry;
+          return UME.Cleanup &&
+                 cast<MachineBasicBlock *>(UME.Cleanup) == Cleanup &&
+                 UME.Type == CxxUnwindMapEntry::ActionType::Cleanup;
+        });
+    if (HasFallbackReference)
+      continue;
+
+    for (CxxUnwindMapEntry &UME : EHInfo->CxxUnwindMap)
+      if (UME.Cleanup && cast<MachineBasicBlock *>(UME.Cleanup) == Cleanup)
+        UME.Cleanup = nullptr;
+    for (CxxUnwindMapEntry4Override &Override :
+         EHInfo->CxxUnwindMap4Overrides) {
+      CxxUnwindMapEntry &UME = Override.Entry;
+      if (UME.Cleanup && cast<MachineBasicBlock *>(UME.Cleanup) == Cleanup)
+        UME.Cleanup = nullptr;
+    }
+    while (!Cleanup->pred_empty())
+      (*Cleanup->pred_begin())->removeSuccessor(Cleanup);
+    while (!Cleanup->succ_empty())
+      Cleanup->removeSuccessor(Cleanup->succ_begin());
+    MF.erase(Cleanup);
+    Changed = true;
+  }
+  return Changed;
+}
 //===----------------------------------------------------------------------===//
 //                      Pattern Matcher Implementation
 //===----------------------------------------------------------------------===//
@@ -180,7 +245,8 @@ namespace {
 
       // OptFor[Min]Size are used in pattern predicates that isel is matching.
       OptForMinSize = MF.getFunction().hasMinSize();
-      return SelectionDAGISel::runOnMachineFunction(MF);
+      bool Changed = SelectionDAGISel::runOnMachineFunction(MF);
+      return removeFH4DirectCleanupFunclets(MF) || Changed;
     }
 
     void emitFunctionEntryCode() override;
