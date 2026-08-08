@@ -11,7 +11,7 @@ declare void @destroy(ptr) nounwind
 declare void @cleanup_a()
 declare void @cleanup_b()
 
-define void @pure_noexcept() nounwind uwtable personality ptr @__CxxFrameHandler4 {
+define void @pure_noexcept() #0 personality ptr @__CxxFrameHandler4 {
 entry:
   call void @may_throw()
   ret void
@@ -25,7 +25,19 @@ entry:
 ; ASM: $cppxdata$pure_noexcept:
 ; ASM-NEXT: .byte 96{{.*}}# FuncInfo4Header
 
-define void @noexcept_catch() nounwind personality ptr @__CxxFrameHandler4 {
+define void @generic_nounwind() nounwind uwtable personality ptr @__CxxFrameHandler4 {
+entry:
+  call void @may_throw()
+  ret void
+}
+
+; Generic nounwind, including optimizer-inferred nounwind, is not a language
+; noexcept contract and must not acquire an FH4 handler or NoExcept bit.
+; ASM-LABEL: generic_nounwind:
+; ASM-NOT: .seh_handler
+; ASM: retq
+
+define void @noexcept_catch() #0 personality ptr @__CxxFrameHandler4 {
 entry:
   invoke void @may_throw()
           to label %return unwind label %catch.dispatch
@@ -422,3 +434,5 @@ done:
 ; ASM: xorl %eax, %eax
 ; ASM: retq{{.*}}# CATCHRET
 ; ASM: $cppxdata$catch$
+
+attributes #0 = { nounwind uwtable "msvc-cxx-eh4-noexcept" }
