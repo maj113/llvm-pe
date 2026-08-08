@@ -43,6 +43,8 @@ const EHPersonality EHPersonality::MSVC_C_specific_handler = {
     "__C_specific_handler", nullptr};
 const EHPersonality EHPersonality::MSVC_CxxFrameHandler3 = {
     "__CxxFrameHandler3", nullptr};
+const EHPersonality EHPersonality::MSVC_CxxFrameHandler4 = {
+    "__CxxFrameHandler4", nullptr};
 const EHPersonality EHPersonality::GNU_Wasm_CPlusPlus = {
     "__gxx_wasm_personality_v0", nullptr};
 const EHPersonality EHPersonality::XL_CPlusPlus = {"__xlcxx_personality_v1",
@@ -50,11 +52,19 @@ const EHPersonality EHPersonality::XL_CPlusPlus = {"__xlcxx_personality_v1",
 const EHPersonality EHPersonality::ZOS_CPlusPlus = {"__zos_cxx_personality_v2",
                                                     nullptr};
 
+static const EHPersonality &
+getMSVCCXXPersonality(const TargetInfo &Target, const CodeGenOptions &CGOpts) {
+  if (CGOpts.MicrosoftCXXEH4 &&
+      Target.getTriple().getArch() == llvm::Triple::x86_64)
+    return EHPersonality::MSVC_CxxFrameHandler4;
+  return EHPersonality::MSVC_CxxFrameHandler3;
+}
+
 static const EHPersonality &getCPersonality(const TargetInfo &Target,
                                             const CodeGenOptions &CGOpts) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (CGOpts.hasSjLjExceptions())
     return EHPersonality::GNU_C_SJLJ;
   if (CGOpts.hasDWARFExceptions())
@@ -69,7 +79,7 @@ static const EHPersonality &getObjCPersonality(const TargetInfo &Target,
                                                const LangOptions &L) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (T.isWasm())
     return EHPersonality::GNU_Wasm_CPlusPlus;
 
@@ -101,7 +111,7 @@ const EHPersonality &getCXXEHPersonality(const TargetInfo &Target,
                                          const CodeGenOptions &CGOpts) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (T.isOSAIX())
     return EHPersonality::XL_CPlusPlus;
   if (CGOpts.hasSjLjExceptions())
@@ -124,7 +134,7 @@ static const EHPersonality &getObjCXXPersonality(const TargetInfo &Target,
                                                  const LangOptions &L) {
   auto Triple = Target.getTriple();
   if (Triple.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (Triple.isWasm())
     return EHPersonality::GNU_Wasm_CPlusPlus;
 

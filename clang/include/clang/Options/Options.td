@@ -2344,6 +2344,12 @@ defm async_exceptions: BoolFOption<"async-exceptions",
   PosFlag<SetTrue, [], [ClangOption, CC1Option],
           "Enable EH Asynchronous exceptions">,
   NegFlag<SetFalse>>;
+defm ms_cxx_eh4: BoolFOption<"ms-cxx-eh4",
+  CodeGenOpts<"MicrosoftCXXEH4">, DefaultFalse,
+  PosFlag<SetTrue, [], [ClangOption, CLOption, CC1Option],
+          "Use compact __CxxFrameHandler4 metadata for Microsoft C++ exceptions">,
+  NegFlag<SetFalse, [], [ClangOption, CLOption, CC1Option],
+          "Use __CxxFrameHandler3 metadata for Microsoft C++ exceptions">>;
 defm cxx_modules : BoolFOption<"cxx-modules",
   LangOpts<"CPlusPlusModules">, Default<cpp20.KeyPath>,
   NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
@@ -9730,6 +9736,8 @@ def _SLASH_d2epilogunwind : CLFlag<"d2epilogunwind">,
   HelpText<"Best effort generate unwind v2 (epilog) information for x64 Windows">;
 def _SLASH_d2epilogunwindrequirev2 : CLFlag<"d2epilogunwindrequirev2">,
   HelpText<"Require generation of unwind v2 (epilog) information for x64 Windows">;
+def _SLASH_d2FH4 : CLFlag<"d2FH4">, Alias<fms_cxx_eh4>;
+def _SLASH_d2FH4_ : CLFlag<"d2FH4-">, Alias<fno_ms_cxx_eh4>;
 def _SLASH_d2guardnochecks : CLFlag<"d2guardnochecks">,
   HelpText<"When used with /guard:cf, emits Windows Control Flow Guard tables only (no checks)">;
 def _SLASH_d2guardcfgdispatch : CLFlag<"d2guardcfgdispatch">,

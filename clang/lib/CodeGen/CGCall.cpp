@@ -6544,7 +6544,13 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       HasMips16 = llvm::is_contained(TargetOpts.Features, "+mips16");
   }
   if (llvm::CallInst *Call = dyn_cast<llvm::CallInst>(CI)) {
-    if (TargetDecl && TargetDecl->hasAttr<NotTailCalledAttr>())
+    // A potentially throwing tail call would remove the FH4 frame that
+    // enforces this function's noexcept contract. Keep only that call in the
+    // frame; later nounwind calls remain eligible for MSVC-compatible tail
+    // calls after the frame is restored.
+    if (MSVCXXEH4Noexcept && !CI->doesNotThrow() && !IsMustTail)
+      Call->setTailCallKind(llvm::CallInst::TCK_NoTail);
+    else if (TargetDecl && TargetDecl->hasAttr<NotTailCalledAttr>())
       Call->setTailCallKind(llvm::CallInst::TCK_NoTail);
     else if (IsMustTail) {
       if (IsPPC) {
@@ -6653,6 +6659,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   // If this is a musttail call, return immediately. We do not branch to the
   // epilogue in this case.
   if (IsMustTail) {
+    if (MSVCXXEH4Noexcept && !CI->doesNotThrow())
+      CGM.getDiags().Report(MustTailCall->getBeginLoc(),
+                            diag::err_musttail_noexcept_mismatch);
     for (auto it = EHStack.find(CurrentCleanupScopeDepth); it != EHStack.end();
          ++it) {
       // A noexcept caller pushes an EHTerminateScope to call std::terminate()

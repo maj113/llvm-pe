@@ -7962,6 +7962,17 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     EH = addExceptionArgs(Args, InputType, TC, KernelOrKext,
                           IsDeviceOffloadAction, Runtime, CmdArgs);
 
+  if (Arg *A = Args.getLastArg(
+          options::OPT_fms_cxx_eh4, options::OPT_fno_ms_cxx_eh4,
+          options::OPT__SLASH_d2FH4, options::OPT__SLASH_d2FH4_)) {
+    A->claim();
+    if (A->getOption().matches(options::OPT_fms_cxx_eh4) ||
+        A->getOption().matches(options::OPT__SLASH_d2FH4))
+      CmdArgs.push_back("-fms-cxx-eh4");
+    else
+      CmdArgs.push_back("-fno-ms-cxx-eh4");
+  }
+
   // Handle exception personalities
   Arg *A = Args.getLastArg(
       options::OPT_fsjlj_exceptions, options::OPT_fseh_exceptions,
