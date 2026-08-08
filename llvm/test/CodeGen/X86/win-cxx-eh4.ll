@@ -330,8 +330,10 @@ cleanup:
 }
 
 ; A one-call destructor cleanup is represented directly in FH4 xdata (type 1)
-; and its outlined cleanup funclet is removed.
+; and its outlined cleanup funclet is removed. A cleanup-only record is not
+; consulted during handler search.
 ; ASM-LABEL: direct_object_cleanup:
+; ASM: .seh_handler __CxxFrameHandler4, @unwind{{[[:space:]]*$}}
 ; ASM-NOT: ?dtor$
 ; ASM: $stateUnwindMap$direct_object_cleanup:
 ; ASM: .long {{.*}}+1

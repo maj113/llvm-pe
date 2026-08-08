@@ -238,6 +238,21 @@ static bool funcletNeedsFH4Handler(const MachineBasicBlock &MBB,
   return false;
 }
 
+static bool funcletNeedsFH4ExceptionHandler(const MachineBasicBlock &MBB,
+                                            const WinEHFuncInfo &FuncInfo) {
+  // A catch record participates in handler search even when it only owns
+  // unwind actions. In particular, FrameHandler4 uses the catch-record bit to
+  // recover the parent state when another exception escapes the catch.
+  if (MBB.isEHFuncletEntry())
+    return true;
+  if (MBB.getParent()->getFunction().hasFnAttribute(MSVCXXEH4NoexceptAttr))
+    return true;
+  for (const WinEHTryBlockMapEntry &TBME : FuncInfo.TryBlockMap)
+    if (isOwnedBy(TBME.Owner, &MBB))
+      return true;
+  return false;
+}
+
 static CxxUnwindMapEntry getFH4UnwindEntry(const WinEHFuncInfo &FuncInfo,
                                            const MachineBasicBlock *Funclet,
                                            int State) {
@@ -314,10 +329,16 @@ void WinException::beginFunclet(const MachineBasicBlock &MBB,
     // inliner doesn't allow inlining them, this isn't a major problem in
     // practice.
     bool EmitHandler = !CurrentFuncletEntry->isCleanupFuncletEntry();
-    if (EmitHandler && isMSVCXXEH4Personality(F.getPersonalityFn()))
-      EmitHandler = funcletNeedsFH4Handler(MBB, *Asm->MF->getWinEHFuncInfo());
+    bool IsFH4 = isMSVCXXEH4Personality(F.getPersonalityFn());
+    bool Except = true;
+    if (EmitHandler && IsFH4) {
+      const WinEHFuncInfo &FuncInfo = *Asm->MF->getWinEHFuncInfo();
+      EmitHandler = funcletNeedsFH4Handler(MBB, FuncInfo);
+      if (EmitHandler)
+        Except = funcletNeedsFH4ExceptionHandler(MBB, FuncInfo);
+    }
     if (EmitHandler) {
-      Asm->OutStreamer->emitWinEHHandler(PersHandlerSym, true, true);
+      Asm->OutStreamer->emitWinEHHandler(PersHandlerSym, true, Except);
       CurrentFuncletHasHandler = true;
     }
   }
