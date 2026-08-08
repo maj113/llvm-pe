@@ -97,8 +97,37 @@ static bool removeFH4DirectCleanupFunclets(MachineFunction &MF) {
       if (UME.Cleanup && cast<MachineBasicBlock *>(UME.Cleanup) == Cleanup)
         UME.Cleanup = nullptr;
     }
-    while (!Cleanup->pred_empty())
-      (*Cleanup->pred_begin())->removeSuccessor(Cleanup);
+
+    // EH edges also keep outer catch funclets reachable to machine CFG passes.
+    // Preserve those edges when the direct FH4 action makes this cleanup
+    // funclet unnecessary. Otherwise UnreachableMachineBlockElim can delete an
+    // outer catch which remains referenced by the handler map.
+    SmallVector<MachineBasicBlock *, 2> Successors(Cleanup->successors());
+    SmallVector<MachineBasicBlock *, 2> Predecessors(Cleanup->predecessors());
+    for (MachineBasicBlock *Pred : Predecessors) {
+      bool HasProbabilities = Pred->hasSuccessorProbabilities();
+      auto CleanupIt = llvm::find(Pred->successors(), Cleanup);
+      BranchProbability CleanupProbability =
+          Pred->getSuccProbability(CleanupIt);
+      Pred->removeSuccessor(Cleanup);
+      for (MachineBasicBlock *Succ : Successors) {
+        auto SuccIt = llvm::find(Cleanup->successors(), Succ);
+        BranchProbability Probability =
+            CleanupProbability * Cleanup->getSuccProbability(SuccIt);
+        auto Existing = llvm::find(Pred->successors(), Succ);
+        if (Existing == Pred->succ_end()) {
+          if (HasProbabilities)
+            Pred->addSuccessor(Succ, Probability);
+          else
+            Pred->addSuccessorWithoutProb(Succ);
+        } else if (HasProbabilities) {
+          Probability += Pred->getSuccProbability(Existing);
+          Pred->setSuccProbability(Existing, Probability);
+        }
+      }
+      if (HasProbabilities)
+        Pred->normalizeSuccProbs();
+    }
     while (!Cleanup->succ_empty())
       Cleanup->removeSuccessor(Cleanup->succ_begin());
     MF.erase(Cleanup);

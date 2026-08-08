@@ -710,10 +710,9 @@ unsigned StackColoring::collectMarkers(unsigned NumSlot) {
       ConservativeSlots.set(slot);
   }
 
-  // The write to the catch object by the personality function is not propely
-  // modeled in IR: It happens before any cleanuppads are executed, even if the
-  // first mention of the catch object is in a catchpad. As such, mark catch
-  // object slots as conservative, so they are excluded from first-use analysis.
+  // FH4 direct destructor actions access their object slots from outside the
+  // ordinary machine instruction stream. Keep those slots out of first-use
+  // analysis, which cannot see that access.
   if (WinEHFuncInfo *EHInfo = MF->getWinEHFuncInfo();
       EHInfo && MF->getFunction().hasPersonalityFn() &&
       isMSVCXXEH4Personality(MF->getFunction().getPersonalityFn())) {
@@ -1129,7 +1128,7 @@ void StackColoring::remapInstructions(DenseMap<int, int> &SlotRemap) {
         Ref->setValue(NewSV);
     }
 
-  // Update the location of C++ catch objects for the MSVC personality routine.
+  // Update direct FH4 destructor object locations after stack-slot remapping.
   if (WinEHFuncInfo *EHInfo = MF->getWinEHFuncInfo();
       EHInfo && MF->getFunction().hasPersonalityFn() &&
       isMSVCXXEH4Personality(MF->getFunction().getPersonalityFn())) {
