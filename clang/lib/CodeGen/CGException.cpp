@@ -124,17 +124,27 @@ EHPersonality::MSVC_C_specific_handler = { "__C_specific_handler", nullptr };
 const EHPersonality
 EHPersonality::MSVC_CxxFrameHandler3 = { "__CxxFrameHandler3", nullptr };
 const EHPersonality
+EHPersonality::MSVC_CxxFrameHandler4 = { "__CxxFrameHandler4", nullptr };
+const EHPersonality
 EHPersonality::GNU_Wasm_CPlusPlus = { "__gxx_wasm_personality_v0", nullptr };
 const EHPersonality EHPersonality::XL_CPlusPlus = {"__xlcxx_personality_v1",
                                                    nullptr};
 const EHPersonality EHPersonality::ZOS_CPlusPlus = {"__zos_cxx_personality_v2",
                                                     nullptr};
 
+static const EHPersonality &
+getMSVCCXXPersonality(const TargetInfo &Target, const CodeGenOptions &CGOpts) {
+  if (CGOpts.MicrosoftCXXEH4 &&
+      Target.getTriple().getArch() == llvm::Triple::x86_64)
+    return EHPersonality::MSVC_CxxFrameHandler4;
+  return EHPersonality::MSVC_CxxFrameHandler3;
+}
+
 static const EHPersonality &getCPersonality(const TargetInfo &Target,
                                             const CodeGenOptions &CGOpts) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (CGOpts.hasSjLjExceptions())
     return EHPersonality::GNU_C_SJLJ;
   if (CGOpts.hasDWARFExceptions())
@@ -149,7 +159,7 @@ static const EHPersonality &getObjCPersonality(const TargetInfo &Target,
                                                const LangOptions &L) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
 
   switch (L.ObjCRuntime.getKind()) {
   case ObjCRuntime::FragileMacOSX:
@@ -179,7 +189,7 @@ static const EHPersonality &getCXXPersonality(const TargetInfo &Target,
                                               const CodeGenOptions &CGOpts) {
   const llvm::Triple &T = Target.getTriple();
   if (T.isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
   if (T.isOSAIX())
     return EHPersonality::XL_CPlusPlus;
   if (CGOpts.hasSjLjExceptions())
@@ -201,7 +211,7 @@ static const EHPersonality &getObjCXXPersonality(const TargetInfo &Target,
                                                  const CodeGenOptions &CGOpts,
                                                  const LangOptions &L) {
   if (Target.getTriple().isWindowsMSVCEnvironment())
-    return EHPersonality::MSVC_CxxFrameHandler3;
+    return getMSVCCXXPersonality(Target, CGOpts);
 
   switch (L.ObjCRuntime.getKind()) {
   // In the fragile ABI, just use C++ exception handling and hope
@@ -280,6 +290,30 @@ static llvm::Constant *getOpaquePersonalityFn(CodeGenModule &CGM,
                                         const EHPersonality &Personality) {
   llvm::FunctionCallee Fn = getPersonalityFn(CGM, Personality);
   return cast<llvm::Constant>(Fn.getCallee());
+}
+
+static bool useMSVCXXEH4NoexceptMetadata(CodeGenFunction &CGF) {
+  return !CGF.getLangOpts().EHAsynch &&
+         &EHPersonality::get(CGF) == &EHPersonality::MSVC_CxxFrameHandler4;
+}
+
+static void beginNoexceptScope(CodeGenFunction &CGF) {
+  if (!useMSVCXXEH4NoexceptMetadata(CGF)) {
+    CGF.EHStack.pushTerminate();
+    return;
+  }
+  CGF.MSVCXXEH4Noexcept = true;
+}
+
+void CodeGenFunction::activateMSVCXXEH4Noexcept() {
+  assert(MSVCXXEH4Noexcept && "activating an inactive FH4 noexcept scope");
+  // FrameHandler4 enforces noexcept directly from FuncInfo4. Install the
+  // personality only when an operation can throw, matching MSVC's omission of
+  // EH metadata from true leaf noexcept functions.
+  if (!CurFn->hasPersonalityFn()) {
+    const EHPersonality &Personality = EHPersonality::get(*this);
+    CurFn->setPersonalityFn(getOpaquePersonalityFn(CGM, Personality));
+  }
 }
 
 /// Check whether a landingpad instruction only uses C++ features.
@@ -488,7 +522,7 @@ void CodeGenFunction::EmitStartEHSpec(const Decl *D) {
     // Check if CapturedDecl is nothrow and create terminate scope for it.
     if (const CapturedDecl* CD = dyn_cast_or_null<CapturedDecl>(D)) {
       if (CD->isNothrow())
-        EHStack.pushTerminate();
+        beginNoexceptScope(*this);
     }
     return;
   }
@@ -544,7 +578,7 @@ void CodeGenFunction::EmitStartEHSpec(const Decl *D) {
   } else if (Proto->canThrow() == CT_Cannot) {
     // noexcept functions are simple terminate scopes.
     if (!getLangOpts().EHAsynch) // -EHa: HW exception still can occur
-      EHStack.pushTerminate();
+      beginNoexceptScope(*this);
   }
 }
 
@@ -594,8 +628,12 @@ void CodeGenFunction::EmitEndEHSpec(const Decl *D) {
   if (!FD) {
     // Check if CapturedDecl is nothrow and pop terminate scope for it.
     if (const CapturedDecl* CD = dyn_cast_or_null<CapturedDecl>(D)) {
-      if (CD->isNothrow() && !EHStack.empty())
-        EHStack.popTerminate();
+      if (CD->isNothrow()) {
+        if (useMSVCXXEH4NoexceptMetadata(*this))
+          MSVCXXEH4Noexcept = false;
+        else if (!EHStack.empty())
+          EHStack.popTerminate();
+      }
     }
     return;
   }
@@ -621,10 +659,12 @@ void CodeGenFunction::EmitEndEHSpec(const Decl *D) {
     EHFilterScope &filterScope = cast<EHFilterScope>(*EHStack.begin());
     emitFilterDispatchBlock(*this, filterScope);
     EHStack.popFilter();
-  } else if (Proto->canThrow() == CT_Cannot &&
-              /* possible empty when under async exceptions */
-             !EHStack.empty()) {
-    EHStack.popTerminate();
+  } else if (Proto->canThrow() == CT_Cannot) {
+    if (useMSVCXXEH4NoexceptMetadata(*this))
+      MSVCXXEH4Noexcept = false;
+    else if (!EHStack.empty())
+      // The stack can be empty under asynchronous exceptions.
+      EHStack.popTerminate();
   }
 }
 
