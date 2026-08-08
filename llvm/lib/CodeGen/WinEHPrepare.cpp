@@ -27,6 +27,7 @@
 #include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
@@ -194,21 +195,112 @@ bool WinEHPrepareImpl::runOnFunction(Function &Fn) {
 }
 
 static int addUnwindMapEntry(WinEHFuncInfo &FuncInfo, int ToState,
-                             const BasicBlock *BB) {
+                             const BasicBlock *BB, const BasicBlock *Owner) {
   CxxUnwindMapEntry UME;
   UME.ToState = ToState;
   UME.Cleanup = BB;
+  UME.Owner = Owner;
+  UME.Type = BB ? CxxUnwindMapEntry::ActionType::Cleanup
+                : CxxUnwindMapEntry::ActionType::NoUW;
   FuncInfo.CxxUnwindMap.push_back(UME);
   return FuncInfo.getLastStateNumber();
 }
 
+static void recognizeFH4DirectCleanup(const CleanupPadInst *CleanupPad,
+                                      CxxUnwindMapEntry &UME) {
+  const BasicBlock *BB = CleanupPad->getParent();
+  const auto *CleanupRet = dyn_cast<CleanupReturnInst>(BB->getTerminator());
+  if (!CleanupRet || CleanupRet->getCleanupPad() != CleanupPad)
+    return;
+
+  const CallBase *ActionCall = nullptr;
+  SmallVector<const LoadInst *, 1> Loads;
+  for (const Instruction &I : *BB) {
+    if (&I == CleanupPad || &I == CleanupRet || isa<DbgInfoIntrinsic>(I))
+      continue;
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+      if (II->getIntrinsicID() == Intrinsic::lifetime_end)
+        continue;
+      return;
+    }
+    if (const auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (!LI->isSimple())
+        return;
+      Loads.push_back(LI);
+      continue;
+    }
+    const auto *CB = dyn_cast<CallBase>(&I);
+    if (!CB || ActionCall || CB->arg_size() != 1 || !CB->doesNotThrow())
+      return;
+    const Function *Callee = CB->getCalledFunction();
+    if (!Callee || Callee->isVarArg() || Callee->arg_size() != 1 ||
+        !Callee->getReturnType()->isVoidTy() ||
+        !Callee->getArg(0)->getType()->isPointerTy() ||
+        CB->getCallingConv() != CallingConv::C)
+      return;
+    ActionCall = CB;
+  }
+  if (!ActionCall)
+    return;
+
+  const AllocaInst *Object = nullptr;
+  CxxUnwindMapEntry::ActionType Type;
+  Value *This = ActionCall->getArgOperand(0)->stripPointerCasts();
+  if (const auto *AI = dyn_cast<AllocaInst>(This)) {
+    if (!AI->isStaticAlloca() || !Loads.empty())
+      return;
+    Object = AI;
+    Type = CxxUnwindMapEntry::ActionType::DtorWithObj;
+  } else if (const auto *LI = dyn_cast<LoadInst>(This)) {
+    if (Loads.size() != 1 || Loads.front() != LI)
+      return;
+    Object = dyn_cast<AllocaInst>(LI->getPointerOperand()->stripPointerCasts());
+    if (!Object || !Object->isStaticAlloca())
+      return;
+    Type = CxxUnwindMapEntry::ActionType::DtorWithPtrToObj;
+  } else {
+    return;
+  }
+
+  UME.Type = Type;
+  UME.Action = ActionCall->getCalledFunction();
+  UME.Object.Alloca = Object;
+}
+
+static CxxUnwindMapEntry *claimFH4CatchBaseState(WinEHFuncInfo &FuncInfo,
+                                                 int ParentState,
+                                                 const BasicBlock *Owner,
+                                                 const BasicBlock *Cleanup) {
+  if (!Owner || ParentState < 0)
+    return nullptr;
+  for (const CxxUnwindMapEntry4Override &Override :
+       FuncInfo.CxxUnwindMap4Overrides)
+    if (Override.Entry.Owner &&
+        cast<const BasicBlock *>(Override.Entry.Owner) == Owner)
+      return nullptr;
+
+  CxxUnwindMapEntry4Override Override;
+  Override.State = ParentState;
+  Override.Entry = FuncInfo.CxxUnwindMap[ParentState];
+  Override.Entry.Owner = Owner;
+  Override.Entry.Cleanup = Cleanup;
+  Override.Entry.Action = nullptr;
+  Override.Entry.Object.Alloca = nullptr;
+  Override.Entry.Type = Cleanup ? CxxUnwindMapEntry::ActionType::Cleanup
+                                : CxxUnwindMapEntry::ActionType::NoUW;
+  FuncInfo.CxxUnwindMap4Overrides.push_back(Override);
+  return &FuncInfo.CxxUnwindMap4Overrides.back().Entry;
+}
+
 static void addTryBlockMapEntry(WinEHFuncInfo &FuncInfo, int TryLow,
                                 int TryHigh, int CatchHigh,
-                                ArrayRef<const CatchPadInst *> Handlers) {
+                                ArrayRef<const CatchPadInst *> Handlers,
+                                const BasicBlock *Owner, bool IsFH4) {
   WinEHTryBlockMapEntry TBME;
   TBME.TryLow = TryLow;
   TBME.TryHigh = TryHigh;
   TBME.CatchHigh = CatchHigh;
+  TBME.Owner = Owner;
   assert(TBME.TryLow <= TBME.TryHigh);
   for (const CatchPadInst *CPI : Handlers) {
     WinEHHandlerType HT;
@@ -226,6 +318,17 @@ static void addTryBlockMapEntry(WinEHFuncInfo &FuncInfo, int TryLow,
       HT.CatchObj.Alloca = AI;
     else
       HT.CatchObj.Alloca = nullptr;
+    if (IsFH4) {
+      for (const User *U : CPI->users()) {
+        const auto *CRI = dyn_cast<CatchReturnInst>(U);
+        if (!CRI)
+          continue;
+        const BasicBlock *Continuation = CRI->getSuccessor();
+        auto It = llvm::find(HT.Continuations, Continuation);
+        if (It == HT.Continuations.end())
+          HT.Continuations.push_back(Continuation);
+      }
+    }
     TBME.HandlerArray.push_back(HT);
   }
   FuncInfo.TryBlockMap.push_back(TBME);
@@ -432,7 +535,7 @@ static const BasicBlock *getEHPadFromPredecessor(const BasicBlock *BB,
 //      FuncInfo.EHPadStateMap[] and FuncInfo.CxxUnwindMap[]
 static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
                                      const Instruction *FirstNonPHI,
-                                     int ParentState) {
+                                     int ParentState, bool IsFH4) {
   const BasicBlock *BB = FirstNonPHI->getParent();
   assert(BB->isEHPad() && "not a funclet!");
 
@@ -445,14 +548,25 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
       auto *CatchPad = cast<CatchPadInst>(CatchPadBB->getFirstNonPHIIt());
       Handlers.push_back(CatchPad);
     }
-    int TryLow = addUnwindMapEntry(FuncInfo, ParentState, nullptr);
+    const BasicBlock *Owner = nullptr;
+    if (IsFH4) {
+      const auto *ParentPad = CatchSwitch->getParentPad();
+      if (!isa<ConstantTokenNone>(ParentPad))
+        Owner = cast<FuncletPadInst>(ParentPad)->getParent();
+    }
+    CxxUnwindMapEntry *ReusedBase =
+        IsFH4 ? claimFH4CatchBaseState(FuncInfo, ParentState, Owner, nullptr)
+              : nullptr;
+    int TryLow = ReusedBase
+                     ? ParentState
+                     : addUnwindMapEntry(FuncInfo, ParentState, nullptr, Owner);
     FuncInfo.EHPadStateMap[CatchSwitch] = TryLow;
     for (const BasicBlock *PredBlock : predecessors(BB))
       if ((PredBlock = getEHPadFromPredecessor(PredBlock,
                                                CatchSwitch->getParentPad())))
         calculateCXXStateNumbers(FuncInfo, &*PredBlock->getFirstNonPHIIt(),
-                                 TryLow);
-    int CatchLow = addUnwindMapEntry(FuncInfo, ParentState, nullptr);
+                                 TryLow, IsFH4);
+    int CatchLow = addUnwindMapEntry(FuncInfo, ParentState, nullptr, Owner);
 
     // catchpads are separate funclets in C++ EH due to the way rethrow works.
     int TryHigh = CatchLow - 1;
@@ -463,7 +577,8 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
     const Module *Mod = BB->getParent()->getParent();
     bool IsPreOrder = Mod->getTargetTriple().isArch64Bit();
     if (IsPreOrder)
-      addTryBlockMapEntry(FuncInfo, TryLow, TryHigh, CatchLow, Handlers);
+      addTryBlockMapEntry(FuncInfo, TryLow, TryHigh, CatchLow, Handlers, Owner,
+                          IsFH4);
     unsigned TBMEIdx = FuncInfo.TryBlockMap.size() - 1;
 
     for (const auto *CatchPad : Handlers) {
@@ -474,7 +589,7 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
         if (auto *InnerCatchSwitch = dyn_cast<CatchSwitchInst>(UserI)) {
           BasicBlock *UnwindDest = InnerCatchSwitch->getUnwindDest();
           if (!UnwindDest || UnwindDest == CatchSwitch->getUnwindDest())
-            calculateCXXStateNumbers(FuncInfo, UserI, CatchLow);
+            calculateCXXStateNumbers(FuncInfo, UserI, CatchLow, IsFH4);
         }
         if (auto *InnerCleanupPad = dyn_cast<CleanupPadInst>(UserI)) {
           BasicBlock *UnwindDest = getCleanupRetUnwindDest(InnerCleanupPad);
@@ -482,7 +597,7 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
           // enclosing catch pad doesn't it must be post-dominated by an
           // unreachable instruction.
           if (!UnwindDest || UnwindDest == CatchSwitch->getUnwindDest())
-            calculateCXXStateNumbers(FuncInfo, UserI, CatchLow);
+            calculateCXXStateNumbers(FuncInfo, UserI, CatchLow, IsFH4);
         }
       }
     }
@@ -491,7 +606,8 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
     if (IsPreOrder)
       FuncInfo.TryBlockMap[TBMEIdx].CatchHigh = CatchHigh;
     else // PostOrder
-      addTryBlockMapEntry(FuncInfo, TryLow, TryHigh, CatchHigh, Handlers);
+      addTryBlockMapEntry(FuncInfo, TryLow, TryHigh, CatchHigh, Handlers, Owner,
+                          IsFH4);
 
     LLVM_DEBUG(dbgs() << "TryLow[" << BB->getName() << "]: " << TryLow << '\n');
     LLVM_DEBUG(dbgs() << "TryHigh[" << BB->getName() << "]: " << TryHigh
@@ -507,7 +623,22 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
     if (!Inserted)
       return;
 
-    int CleanupState = addUnwindMapEntry(FuncInfo, ParentState, BB);
+    const BasicBlock *Owner = nullptr;
+    if (IsFH4) {
+      const auto *ParentPad = CleanupPad->getParentPad();
+      if (!isa<ConstantTokenNone>(ParentPad))
+        Owner = cast<FuncletPadInst>(ParentPad)->getParent();
+    }
+    CxxUnwindMapEntry *ReusedBase =
+        IsFH4 ? claimFH4CatchBaseState(FuncInfo, ParentState, Owner, BB)
+              : nullptr;
+    int CleanupState =
+        ReusedBase ? ParentState
+                   : addUnwindMapEntry(FuncInfo, ParentState, BB, Owner);
+    CxxUnwindMapEntry &CleanupEntry =
+        ReusedBase ? *ReusedBase : FuncInfo.CxxUnwindMap[CleanupState];
+    if (IsFH4)
+      recognizeFH4DirectCleanup(CleanupPad, CleanupEntry);
     It->second = CleanupState;
     LLVM_DEBUG(dbgs() << "Assigning state #" << CleanupState << " to BB "
                       << BB->getName() << '\n');
@@ -515,7 +646,7 @@ static void calculateCXXStateNumbers(WinEHFuncInfo &FuncInfo,
       if ((PredBlock = getEHPadFromPredecessor(PredBlock,
                                                CleanupPad->getParentPad()))) {
         calculateCXXStateNumbers(FuncInfo, &*PredBlock->getFirstNonPHIIt(),
-                                 CleanupState);
+                                 CleanupState, IsFH4);
       }
     }
     for (const User *U : CleanupPad->users()) {
@@ -682,7 +813,8 @@ void llvm::calculateWinCXXEHStateNumbers(const Function *Fn,
     const Instruction *FirstNonPHI = &*BB.getFirstNonPHIIt();
     if (!isTopLevelPadForMSVC(FirstNonPHI))
       continue;
-    calculateCXXStateNumbers(FuncInfo, FirstNonPHI, -1);
+    calculateCXXStateNumbers(FuncInfo, FirstNonPHI, -1,
+                             isMSVCXXEH4Personality(Fn->getPersonalityFn()));
   }
 
   calculateStateNumbersForInvokes(Fn, FuncInfo);

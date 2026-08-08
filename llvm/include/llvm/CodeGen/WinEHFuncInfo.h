@@ -38,8 +38,31 @@ class MCSymbol;
 using MBBOrBasicBlock = PointerUnion<const BasicBlock *, MachineBasicBlock *>;
 
 struct CxxUnwindMapEntry {
+  enum class ActionType : uint8_t {
+    NoUW,
+    DtorWithObj,
+    DtorWithPtrToObj,
+    Cleanup,
+  } Type = ActionType::NoUW;
+
   int ToState;
   MBBOrBasicBlock Cleanup;
+  /// The catch funclet which owns this state, or null for the parent function.
+  MBBOrBasicBlock Owner;
+
+  /// Direct destructor action and its parent-frame object slot. These compact
+  /// forms coexist with Cleanup so FrameHandler3 can continue using the
+  /// outlined funclet.
+  const Function *Action = nullptr;
+  union {
+    const AllocaInst *Alloca;
+    int FrameIndex;
+  } Object = {};
+};
+
+struct CxxUnwindMapEntry4Override {
+  int State;
+  CxxUnwindMapEntry Entry;
 };
 
 /// Similar to CxxUnwindMapEntry, but supports SEH filters.
@@ -67,12 +90,17 @@ struct WinEHHandlerType {
   } CatchObj = {};
   GlobalVariable *TypeDescriptor;
   MBBOrBasicBlock Handler;
+  /// FrameHandler4 continuation targets. Records with at most two targets use
+  /// their indices; larger records retain the address-return convention.
+  SmallVector<MBBOrBasicBlock, 2> Continuations;
 };
 
 struct WinEHTryBlockMapEntry {
   int TryLow = -1;
   int TryHigh = -1;
   int CatchHigh = -1;
+  /// The catch funclet which owns this try, or null for the parent function.
+  MBBOrBasicBlock Owner;
   SmallVector<WinEHHandlerType, 1> HandlerArray;
 };
 
@@ -93,7 +121,13 @@ struct WinEHFuncInfo {
   DenseMap<const InvokeInst *, int> InvokeStateMap;
   DenseMap<MCSymbol *, std::pair<int, MCSymbol *>> LabelToStateMap;
   DenseMap<const BasicBlock *, int> BlockToStateMap; // for AsynchEH
+  /// EH scope containing each machine block, captured after CFG transforms for
+  /// FrameHandler4 catchret continuation-index lowering.
+  DenseMap<const MachineBasicBlock *, int> EHScopeMembership;
   SmallVector<CxxUnwindMapEntry, 4> CxxUnwindMap;
+  /// FuncInfo4 can give a catch record a different action at a state also
+  /// present in its parent record, avoiding a duplicate catch-base state.
+  SmallVector<CxxUnwindMapEntry4Override, 2> CxxUnwindMap4Overrides;
   SmallVector<WinEHTryBlockMapEntry, 4> TryBlockMap;
   SmallVector<SEHUnwindMapEntry, 4> SEHUnwindMap;
   SmallVector<ClrEHUnwindMapEntry, 4> ClrEHUnwindMap;
