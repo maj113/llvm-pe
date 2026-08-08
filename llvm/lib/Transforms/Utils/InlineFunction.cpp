@@ -2651,6 +2651,14 @@ llvm::InlineResult llvm::CanInlineCallSite(const CallBase &CB,
       return InlineResult::failure("incompatible GC");
   }
 
+  // The FH4 NoExcept flag represents a language noexcept boundary for the
+  // entire function. Inlining into an unmarked caller would either lose that
+  // boundary or incorrectly apply it to all of the caller. A scoped IR
+  // representation would be needed to inline this case safely.
+  if (CalledFunc->hasFnAttribute(MSVCXXEH4NoexceptAttr) &&
+      !Caller->hasFnAttribute(MSVCXXEH4NoexceptAttr))
+    return InlineResult::failure("incompatible Microsoft C++ EH4 noexcept");
+
   // Get the personality function from the callee if it contains a landing pad.
   Constant *CalledPersonality =
       CalledFunc->hasPersonalityFn()
