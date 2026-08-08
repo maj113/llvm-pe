@@ -85,8 +85,19 @@ void WinException::beginFunction(const MachineFunction *MF) {
     Per = classifyEHPersonality(PerFn);
   }
 
-  bool IsFH4Noexcept = F.hasPersonalityFn() && F.doesNotThrow() &&
-                       isMSVCXXEH4Personality(F.getPersonalityFn());
+  // Calls in a nounwind function can themselves acquire nounwind during IR
+  // optimization even though FH4 is what enforces that contract. Test for a
+  // surviving non-intrinsic call rather than Instruction::mayThrow().
+  bool IsFH4Noexcept =
+      F.hasPersonalityFn() && F.hasFnAttribute(MSVCXXEH4NoexceptAttr) &&
+      isMSVCXXEH4Personality(F.getPersonalityFn()) &&
+      llvm::any_of(F, [](const BasicBlock &BB) {
+        return llvm::any_of(BB, [](const Instruction &I) {
+          const auto *CB = dyn_cast<CallBase>(&I);
+          const Function *Callee = CB ? CB->getCalledFunction() : nullptr;
+          return CB && (!Callee || !Callee->isIntrinsic());
+        });
+      });
   bool forceEmitPersonality = F.hasPersonalityFn() &&
                               F.needsUnwindTableEntry() &&
                               (!isNoOpWithoutInvoke(Per) || IsFH4Noexcept);
@@ -142,6 +153,11 @@ void WinException::endFunction(const MachineFunction *MF) {
 
   endFuncletImpl();
 
+  if (!MF->getEHContTargets().empty()) {
+    // Copy the function's EH Continuation targets to a module-level list.
+    llvm::append_range(EHContTargets, MF->getEHContTargets());
+  }
+
   // endFunclet will emit the necessary .xdata tables for table-based SEH.
   if (Per == EHPersonality::MSVC_TableSEH && MF->hasEHFunclets())
     return;
@@ -171,11 +187,6 @@ void WinException::endFunction(const MachineFunction *MF) {
       emitExceptionTable();
 
     Asm->OutStreamer->popSection();
-  }
-
-  if (!MF->getEHContTargets().empty()) {
-    // Copy the function's EH Continuation targets to a module-level list.
-    llvm::append_range(EHContTargets, MF->getEHContTargets());
   }
 }
 
@@ -212,7 +223,7 @@ static bool funcletNeedsFH4Handler(const MachineBasicBlock &MBB,
     return true;
   if (MBB.isCleanupFuncletEntry())
     return false;
-  if (MBB.getParent()->getFunction().doesNotThrow())
+  if (MBB.getParent()->getFunction().hasFnAttribute(MSVCXXEH4NoexceptAttr))
     return true;
   for (const CxxUnwindMapEntry &UME : FuncInfo.CxxUnwindMap)
     if (isOwnedBy(UME.Owner, &MBB))
@@ -371,11 +382,6 @@ void WinException::endFuncletImpl() {
       // No need to emit the EH handler data right here if nothing needs
       // writing to the .xdata section; it will be emitted for all
       // functions that need it in the end anyway.
-    }
-
-    if (!MF->getEHContTargets().empty()) {
-      // Copy the function's EH Continuation targets to a module-level list.
-      llvm::append_range(EHContTargets, MF->getEHContTargets());
     }
 
     // Switch back to the funclet start .text section now that we are done
@@ -1234,7 +1240,7 @@ void WinException::emitCXXFrameHandler4Table(const MachineFunction *MF) {
       Header |= 1u << 4;
     if (!MMI->getModule()->getModuleFlag("eh-asynch"))
       Header |= 1u << 5;
-    if (F.doesNotThrow())
+    if (F.hasFnAttribute(MSVCXXEH4NoexceptAttr))
       Header |= 1u << 6;
 
     OS.emitLabel(R.FuncInfoSym);

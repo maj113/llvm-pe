@@ -1,13 +1,15 @@
-// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fcxx-exceptions \
+// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fms-extensions -fcxx-exceptions \
 // RUN:   -fexceptions -fms-cxx-eh4 -emit-llvm -o - %s | FileCheck %s --check-prefix=FH4
-// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fcxx-exceptions \
+// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fms-extensions -fcxx-exceptions \
 // RUN:   -fexceptions -fms-cxx-eh4 -fno-ms-cxx-eh4 -emit-llvm -o - %s | FileCheck %s --check-prefix=FH3
-// RUN: %clang_cc1 -triple i686-pc-windows-msvc -fcxx-exceptions \
+// RUN: %clang_cc1 -triple i686-pc-windows-msvc -fms-extensions -fcxx-exceptions \
 // RUN:   -fexceptions -fms-cxx-eh4 -emit-llvm -o - %s | FileCheck %s --check-prefix=FH3
-// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fcxx-exceptions \
+// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fms-extensions -fcxx-exceptions \
 // RUN:   -fexceptions -fms-cxx-eh4 -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
-// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fcxx-exceptions \
+// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fms-extensions -fcxx-exceptions \
 // RUN:   -fexceptions -fms-cxx-eh4 -O0 -S -o - %s | FileCheck %s --check-prefix=STACK
+// RUN: %clang_cc1 -triple x86_64-pc-windows-msvc -fms-extensions -fcxx-exceptions \
+// RUN:   -fexceptions -fms-cxx-eh4 -O2 -emit-obj -o %t.obj %s
 
 extern void may_throw();
 extern int may_throw_value(int);
@@ -22,6 +24,10 @@ void use_exception() {
 
 void pure_noexcept() noexcept { may_throw(); }
 void empty_noexcept() noexcept {}
+__declspec(nothrow) void declspec_nothrow() { may_throw(); }
+
+static void optimized_away_callee() {}
+void optimized_noexcept() noexcept { optimized_away_callee(); }
 
 int noexcept_to_throwing(int x) noexcept { return may_throw_value(x); }
 int noexcept_to_nothrow(int x) noexcept { return cannot_throw_value(x); }
@@ -51,6 +57,26 @@ void distinct_cleanup_slots() {
   }
 }
 
+struct InnerCleanup {
+  ~InnerCleanup();
+};
+
+void nested_direct_cleanup() {
+  CleanupObject outer;
+  try {
+    InnerCleanup inner;
+    try {
+      may_throw();
+    } catch (int) {
+    }
+  } catch (...) {
+  }
+}
+
+// The compact direct destructor for `inner` replaces a cleanup funclet whose
+// exceptional successors keep the outer catch reachable. Object emission
+// verifies that removing the funclet does not leave a stale catch$-1 symbol.
+
 // FH4: personality ptr @__CxxFrameHandler4
 // FH4: declare{{.*}} i32 @__CxxFrameHandler4(...)
 // FH4-LABEL: define{{.*}} void @"?pure_noexcept@@YAXXZ"
@@ -60,15 +86,30 @@ void distinct_cleanup_slots() {
 // FH4-LABEL: define{{.*}} void @"?empty_noexcept@@YAXXZ"()
 // FH4-NOT: personality
 // FH4-NEXT: entry:
+// FH4-LABEL: define{{.*}} void @"?declspec_nothrow@@YAXXZ"
+// FH4: invoke void @"?may_throw@@YAXXZ"()
+// FH4: unwind label %terminate
+// FH4: terminate:
+// FH4: call void @{{.*terminate.*}}()
 // FH4-LABEL: define{{.*}} i32 @"?musttail_noexcept@@YAHH@Z"
 // FH4: musttail call{{.*}} @"?cannot_throw_value@@YAHH@Z"
 // FH4-NEXT: ret i32
-// FH4: attributes #[[NOEXCEPT]] = { {{.*}}nounwind
+// FH4: attributes #[[NOEXCEPT]] = { {{.*}}nounwind{{.*}}"msvc-cxx-eh4-noexcept"
 // FH3: personality ptr @__CxxFrameHandler3
 // FH3: declare{{.*}} i32 @__CxxFrameHandler3(...)
 
 // A throwing callee needs the caller's FH4 frame to remain live, whereas a
 // noexcept callee can enforce the contract after a tail call itself.
+// __declspec(nothrow) retains Clang's explicit terminate funclet and does not
+// use FH4's NoExcept bit.
+// ASM-LABEL: "?declspec_nothrow@@YAXXZ":
+// ASM: "$cppxdata$?declspec_nothrow@@YAXXZ":
+// ASM-NEXT: .byte 40{{.*}}# FuncInfo4Header
+// A call eliminated by optimization must not leave a handler on an otherwise
+// empty noexcept function.
+// ASM-LABEL: "?optimized_noexcept@@YAXXZ":
+// ASM-NOT: .seh_handler
+// ASM: retq
 // ASM-LABEL: "?noexcept_to_throwing@@YAHH@Z":
 // ASM: .seh_handler __CxxFrameHandler4, @unwind, @except
 // ASM: callq "?may_throw_value@@YAHH@Z"

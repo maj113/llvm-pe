@@ -22,6 +22,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/DiagnosticSema.h"
+#include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsWebAssembly.h"
@@ -125,8 +126,9 @@ static bool useMSVCXXEH4NoexceptMetadata(CodeGenFunction &CGF) {
          &getEHPersonality(CGF) == &EHPersonality::MSVC_CxxFrameHandler4;
 }
 
-static void beginNoexceptScope(CodeGenFunction &CGF) {
-  if (!useMSVCXXEH4NoexceptMetadata(CGF)) {
+static void beginNoexceptScope(CodeGenFunction &CGF,
+                               bool IsDeclspecNothrow = false) {
+  if (IsDeclspecNothrow || !useMSVCXXEH4NoexceptMetadata(CGF)) {
     CGF.EHStack.pushTerminate();
     return;
   }
@@ -142,6 +144,7 @@ void CodeGenFunction::activateMSVCXXEH4Noexcept() {
     const EHPersonality &Personality = getEHPersonality(*this);
     CurFn->setPersonalityFn(getOpaquePersonalityFn(CGM, Personality));
   }
+  CurFn->addFnAttr(llvm::MSVCXXEH4NoexceptAttr);
 }
 
 /// Check whether a landingpad instruction only uses C++ features.
@@ -409,7 +412,7 @@ void CodeGenFunction::EmitStartEHSpec(const Decl *D) {
   } else if (Proto->canThrow() == CT_Cannot) {
     // noexcept functions are simple terminate scopes.
     if (!getLangOpts().EHAsynch) // -EHa: HW exception still can occur
-      beginNoexceptScope(*this);
+      beginNoexceptScope(*this, EST == EST_NoThrow);
   }
 }
 
@@ -491,7 +494,7 @@ void CodeGenFunction::EmitEndEHSpec(const Decl *D) {
     emitFilterDispatchBlock(*this, filterScope);
     EHStack.popFilter();
   } else if (Proto->canThrow() == CT_Cannot) {
-    if (useMSVCXXEH4NoexceptMetadata(*this))
+    if (EST != EST_NoThrow && useMSVCXXEH4NoexceptMetadata(*this))
       MSVCXXEH4Noexcept = false;
     else if (!EHStack.empty())
       // The stack can be empty under asynchronous exceptions.
