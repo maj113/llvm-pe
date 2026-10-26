@@ -1,0 +1,160 @@
+# Builds the x86-64 Windows clang/lld toolchain from this fork and publishes it
+# as a GitHub release asset.
+name: Windows toolchain release
+
+on:
+  push:
+    tags:
+      - 'toolchain-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create at the dispatched commit (toolchain-YYYY.MM.DD)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-toolchain-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and publish
+    if: github.repository == 'maj113/llvm-pe'
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      contents: write # gh release create
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      ASSET: llvm-pe-x86_64-windows.zip
+    steps:
+      - name: Validate tag
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^toolchain-[0-9A-Za-z._-]+$') {
+            throw "Release tag '$env:RELEASE_TAG' must look like toolchain-YYYY.MM.DD."
+          }
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            cmake
+            clang
+            compiler-rt
+            libc
+            lld
+            llvm
+            third-party
+
+      - name: Enter the MSVC x64 developer environment
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'No Visual Studio installation with the x64 C++ tools.' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $lines = & cmd.exe /d /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed with exit code $LASTEXITCODE." }
+          foreach ($line in $lines) {
+            $name, $value = $line -split '=', 2
+            if ($value -and $name -notmatch '^(GITHUB_|RUNNER_)') {
+              "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          where.exe cl
+          ninja --version
+          cmake --version | Select-Object -First 1
+          cmake -G Ninja -S llvm -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DLLVM_ENABLE_PROJECTS="clang;lld" `
+            -DLLVM_TARGETS_TO_BUILD=X86 `
+            -DLLVM_ENABLE_ASSERTIONS=OFF `
+            -DLLVM_INCLUDE_TESTS=OFF `
+            -DLLVM_INCLUDE_BENCHMARKS=OFF `
+            -DLLVM_INCLUDE_EXAMPLES=OFF `
+            -DLLVM_INCLUDE_DOCS=OFF `
+            -DCLANG_INCLUDE_TESTS=OFF `
+            -DCLANG_INCLUDE_DOCS=OFF `
+            -DCLANG_ENABLE_CIR=OFF `
+            -DLLD_ENABLE_ELF=OFF `
+            -DLLD_ENABLE_MACHO=OFF `
+            -DLLD_ENABLE_MINGW=OFF `
+            -DLLD_ENABLE_WASM=OFF `
+            -DLLVM_ENABLE_DIA_SDK=OFF `
+            -DLLVM_ENABLE_LIBXML2=OFF `
+            -DLLVM_ENABLE_ZLIB=OFF `
+            -DLLVM_ENABLE_ZSTD=OFF `
+            -DLLVM_PARALLEL_LINK_JOBS=2
+          if ($LASTEXITCODE -ne 0) { throw "cmake failed with exit code $LASTEXITCODE." }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          ninja -C build clang lld llvm-lib llvm-ar llvm-rc llvm-ml
+          if ($LASTEXITCODE -ne 0) { throw "ninja failed with exit code $LASTEXITCODE." }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:GITHUB_WORKSPACE 'build'
+          $stage = Join-Path $env:RUNNER_TEMP 'llvm-pe'
+          $bin = New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin')
+          $resource = @(Get-ChildItem -LiteralPath (Join-Path $build 'lib\clang') -Directory)
+          if ($resource.Count -ne 1) { throw "Expected one clang resource directory, found $($resource.Count)." }
+          $major = $resource[0].Name
+          $tools = @{
+            'clang.exe' = 'clang.exe'
+            'clang-cl.exe' = 'clang.exe'
+            'lld-link.exe' = 'lld.exe'
+            'llvm-lib.exe' = 'llvm-lib.exe'
+            'llvm-ar.exe' = 'llvm-ar.exe'
+            'llvm-rc.exe' = 'llvm-rc.exe'
+            'llvm-ml.exe' = 'llvm-ml.exe'
+          }
+          foreach ($tool in $tools.GetEnumerator()) {
+            Copy-Item -LiteralPath (Join-Path $build "bin\$($tool.Value)") -Destination (Join-Path $bin $tool.Key)
+          }
+          $include = New-Item -ItemType Directory -Force -Path (Join-Path $stage "lib\clang\$major")
+          Copy-Item -Recurse -LiteralPath (Join-Path $resource[0].FullName 'include') -Destination $include
+          Copy-Item -LiteralPath 'llvm\LICENSE.TXT' -Destination (Join-Path $stage 'LICENSE.TXT')
+          foreach ($project in 'llvm', 'clang', 'lld') {
+            $dir = New-Item -ItemType Directory -Force -Path (Join-Path $stage "licenses\$project")
+            Copy-Item -LiteralPath "$project\LICENSE.TXT" -Destination $dir
+          }
+          & (Join-Path $bin 'clang-cl.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'The packaged clang-cl does not run.' }
+          $zip = Join-Path $env:GITHUB_WORKSPACE $env:ASSET
+          # 7-Zip writes portable '/' entry separators; Expand-Archive and unzip both read them.
+          7z a -tzip -mx=9 $zip (Join-Path $stage '*')
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE." }
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$zip.sha256", $hash)
+          Write-Host "$env:ASSET SHA-256: $hash"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Windows x86-64 clang/lld toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime)."
+          gh release create $env:RELEASE_TAG $env:ASSET "$env:ASSET.sha256" `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title $env:RELEASE_TAG `
+            --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE." }
