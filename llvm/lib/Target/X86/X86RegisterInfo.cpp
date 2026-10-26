@@ -1277,6 +1277,12 @@ bool X86RegisterInfo::isNonRex2RegClass(const TargetRegisterClass *RC) const {
 }
 
 unsigned X86RegisterInfo::getCSRFirstUseCost(const MachineFunction &MF) const {
+  // A push/pop pair is smaller than the spills, reloads and split copies that
+  // avoiding the callee-saved register costs, so size-optimized functions
+  // always take the register.
+  if (MF.getFunction().hasOptSize())
+    return 0;
+
   // If PPX is implemented, push/pop pairs don't access memory.
   const X86Subtarget &ST = MF.getSubtarget<X86Subtarget>();
   if (ST.is64Bit() && ST.hasPPX())
