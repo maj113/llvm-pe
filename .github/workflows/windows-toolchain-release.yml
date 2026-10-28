@@ -1,8 +1,8 @@
 # Builds the x86-64 Windows toolchain MaiCord uses (clang-cl, lld-link and
-# llvm-lib with clang's core, x86 and Windows resource headers) from this fork.
-# A toolchain-* tag push publishes it as a GitHub release. A manual run builds
-# the chosen host-compiler variant at the dispatched commit and uploads it as a
-# workflow artifact instead, so variants can be measured without a release.
+# llvm-lib with clang's core, x86 and Windows resource headers) from this fork
+# with clang-cl from an earlier release of it: ThinLTO, rpmalloc, /GS-, static
+# MSVC runtime. A toolchain-* tag push publishes it as a GitHub release; a
+# manual run uploads it as a workflow artifact instead.
 name: Windows toolchain release
 
 on:
@@ -10,54 +10,26 @@ on:
     tags:
       - 'toolchain-*'
   workflow_dispatch:
-    inputs:
-      variant:
-        description: 'Host compiler: clang-cl from the bootstrap release (ThinLTO, full LTO or no LTO) or MSVC'
-        type: choice
-        options:
-          - clang-thinlto
-          - clang-fulllto
-          - clang
-          - msvc
-        default: clang-thinlto
-      allocator:
-        description: 'Heap allocator linked into the tools'
-        type: choice
-        options:
-          - rpmalloc
-          - crt
-        default: rpmalloc
-      security_cookies:
-        description: 'Stack buffer security cookies (/GS) in the tools; off is smaller and faster'
-        type: choice
-        options:
-          - 'off'
-          - 'on'
-        default: 'off'
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-toolchain-release-${{ github.ref_name }}-${{ inputs.variant }}-${{ inputs.allocator }}-${{ inputs.security_cookies }}
+  group: windows-toolchain-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build (${{ inputs.variant || 'clang-thinlto' }}, ${{ inputs.allocator || 'rpmalloc' }}, /GS ${{ inputs.security_cookies || 'off' }})
     if: github.repository == 'maj113/llvm-pe'
     runs-on: windows-2022
     timeout-minutes: 360
     permissions:
       contents: write # gh release create
     env:
-      VARIANT: ${{ inputs.variant || 'clang-thinlto' }}
-      ALLOCATOR: ${{ inputs.allocator || 'rpmalloc' }}
-      SECURITY_COOKIES: ${{ inputs.security_cookies || 'off' }}
       ASSET: llvm-pe-x86_64-windows.zip
-      # The clang-cl variants build with this earlier release of the fork, not the runner's LLVM.
-      BOOTSTRAP_TAG: toolchain-2026.10.28.1
-      BOOTSTRAP_SHA256: a683a8eb953bf3b360670be708b53bc8a32e249a7eca8d697c1be475d0b06d5d
+      # The host compiler: this release of the fork, not the runner's LLVM.
+      BOOTSTRAP_TAG: toolchain-2026.10.28.2
+      BOOTSTRAP_SHA256: 5c88e1e44764e3ff5a38d0bbff5538a5ac60896ec1476baf591e57c008e9ecd9
     steps:
       - name: Validate tag
         if: github.event_name == 'push'
@@ -97,8 +69,17 @@ jobs:
             }
           }
 
+      # The extracted bootstrap toolchain is cached under its tag and SHA-256, so a new pin
+      # misses and fetches its own.
+      - name: Restore the bootstrap toolchain
+        id: bootstrap
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bootstrap
+          key: llvm-pe-bootstrap-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_SHA256 }}
+
       - name: Fetch the bootstrap toolchain
-        if: env.VARIANT != 'msvc'
+        if: steps.bootstrap.outputs.cache-hit != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -112,21 +93,34 @@ jobs:
           if ($hash -ne $env:BOOTSTRAP_SHA256.ToUpperInvariant()) {
             throw "$env:ASSET from $env:BOOTSTRAP_TAG hashes to $hash, not $env:BOOTSTRAP_SHA256."
           }
-          $root = Join-Path $env:RUNNER_TEMP 'bootstrap'
-          Expand-Archive -LiteralPath $archive -DestinationPath $root
-          $bin = Join-Path $root 'bin'
-          & (Join-Path $bin 'clang-cl.exe') --version
-          if ($LASTEXITCODE -ne 0) { throw 'The bootstrap clang-cl does not run.' }
-          "HOST_LLVM_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'bootstrap')
+
+      - name: Cache the bootstrap toolchain
+        if: steps.bootstrap.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bootstrap
+          key: llvm-pe-bootstrap-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_SHA256 }}
 
       - name: Configure
         shell: pwsh
         run: |
-          ninja --version
-          cmake --version | Select-Object -First 1
+          $bin = Join-Path $env:RUNNER_TEMP 'bootstrap\bin'
+          & (Join-Path $bin 'clang-cl.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'The bootstrap clang-cl does not run.' }
           $options = @(
             '-DCMAKE_BUILD_TYPE=Release',
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            "-DCMAKE_C_COMPILER=$(Join-Path $bin 'clang-cl.exe')",
+            "-DCMAKE_CXX_COMPILER=$(Join-Path $bin 'clang-cl.exe')",
+            "-DCMAKE_LINKER=$(Join-Path $bin 'lld-link.exe')",
+            "-DCMAKE_AR=$(Join-Path $bin 'llvm-lib.exe')",
+            # Visual Studio's mt, not an llvm-mt the runner image may have on PATH.
+            "-DCMAKE_MT=$((Get-Command mt.exe).Source)",
+            '-DLLVM_ENABLE_LTO=Thin',
+            # Two concurrent LTO links of clang and lld need more memory than a runner has.
+            '-DLLVM_PARALLEL_LINK_JOBS=2',
+            '-DLLVM_ENABLE_RPMALLOC=ON',
             '-DLLVM_ENABLE_PROJECTS=clang;lld',
             '-DLLVM_TARGETS_TO_BUILD=X86',
             '-DLLVM_ENABLE_ASSERTIONS=OFF',
@@ -147,62 +141,19 @@ jobs:
             '-DLLVM_ENABLE_LIBXML2=OFF',
             '-DLLVM_ENABLE_ZLIB=OFF',
             '-DLLVM_ENABLE_ZSTD=OFF')
-          if ($env:VARIANT -eq 'msvc') {
-            $cl = (Get-Command cl.exe).Source
-            $compiler = "MSVC $([Diagnostics.FileVersionInfo]::GetVersionInfo($cl).ProductVersion) ($cl)"
-            $options += '-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl'
-          } else {
-            $clang = Join-Path $env:HOST_LLVM_BIN 'clang-cl.exe'
-            $compiler = (& $clang --version | Out-String).Split("`n")[0].Trim()
-            # Visual Studio's mt, not an llvm-mt the runner image may have on PATH.
-            $options += "-DCMAKE_C_COMPILER=$clang", "-DCMAKE_CXX_COMPILER=$clang",
-              "-DCMAKE_LINKER=$(Join-Path $env:HOST_LLVM_BIN 'lld-link.exe')",
-              "-DCMAKE_AR=$(Join-Path $env:HOST_LLVM_BIN 'llvm-lib.exe')",
-              "-DCMAKE_MT=$((Get-Command mt.exe).Source)"
-          }
-          "HOST_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # Two concurrent LTO links of clang and lld need more memory than a runner has.
-          switch ($env:VARIANT) {
-            'clang-thinlto' { $options += '-DLLVM_ENABLE_LTO=Thin', '-DLLVM_PARALLEL_LINK_JOBS=2' }
-            'clang-fulllto' { $options += '-DLLVM_ENABLE_LTO=Full', '-DLLVM_PARALLEL_LINK_JOBS=1' }
-            default { $options += '-DLLVM_PARALLEL_LINK_JOBS=2' }
-          }
-          if ($env:ALLOCATOR -eq 'rpmalloc') { $options += '-DLLVM_ENABLE_RPMALLOC=ON' }
-          # CMake prepends CFLAGS/CXXFLAGS to its default CMAKE_C_FLAGS/CMAKE_CXX_FLAGS, which
-          # every compile uses. Stack protection is a per-function attribute in the bitcode, so
-          # the LTO links follow it too.
-          if ($env:SECURITY_COOKIES -eq 'off') { $env:CFLAGS = '/GS-'; $env:CXXFLAGS = '/GS-' }
-          $timer = [Diagnostics.Stopwatch]::StartNew()
+          # No stack buffer security cookies: CMake prepends CFLAGS/CXXFLAGS to the flags every
+          # compile uses, and stack protection is a per-function attribute in the bitcode, so the
+          # ThinLTO links follow it too.
+          $env:CFLAGS = '/GS-'
+          $env:CXXFLAGS = '/GS-'
           cmake -G Ninja -S llvm -B build @options
           if ($LASTEXITCODE -ne 0) { throw "cmake failed with exit code $LASTEXITCODE." }
-          "CONFIGURE_SECONDS=$([int]$timer.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Select-String -LiteralPath 'build\CMakeCache.txt' -Pattern '^CMAKE_(C|CXX)_FLAGS(_RELEASE)?:' | ForEach-Object { $_.Line }
 
       - name: Build
         shell: pwsh
         run: |
-          $processors = [Environment]::ProcessorCount
-          $memory = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
-          $jobs = $processors + 2 # ninja's default
-          Write-Host "$((Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()), $processors logical processors, $memory GiB, ninja -j $jobs"
-          $timer = [Diagnostics.Stopwatch]::StartNew()
-          ninja -C build -j $jobs clang lld llvm-ar
+          ninja -C build clang lld llvm-ar
           if ($LASTEXITCODE -ne 0) { throw "ninja failed with exit code $LASTEXITCODE." }
-          $seconds = [int]$timer.Elapsed.TotalSeconds
-          # The final links, from the ninja log (start and end milliseconds per output).
-          $links = foreach ($line in (Get-Content -LiteralPath 'build\.ninja_log' | Select-Object -Skip 1)) {
-            $start, $end, $null, $output, $null = $line -split "`t"
-            if ($output -match '^bin[\\/](clang|lld|llvm-ar)\.exe$') { "$output $([int](([long]$end - [long]$start) / 1000)) s" }
-          }
-          $summary = @(
-            "### $env:VARIANT, $env:ALLOCATOR, /GS $env:SECURITY_COOKIES",
-            "- Host compiler: $env:HOST_COMPILER",
-            "- Runner: $env:ImageOS $env:ImageVersion, $processors logical processors, $memory GiB, ninja -j $jobs",
-            "- Configure: $env:CONFIGURE_SECONDS s; build: $seconds s",
-            "- Final links: $($links -join '; ')")
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          $summary | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE 'build-times.md') -Encoding utf8
-          $summary | Write-Host
 
       - name: Package
         shell: pwsh
@@ -263,17 +214,14 @@ jobs:
           [IO.File]::WriteAllText("$zip.sha256", $hash)
           Write-Host "$env:ASSET SHA-256: $hash"
 
-      - name: Upload the measurement build
+      - name: Upload the toolchain
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: llvm-pe-${{ env.VARIANT }}-${{ env.ALLOCATOR }}-gs-${{ env.SECURITY_COOKIES }}
+          name: llvm-pe-x86_64-windows
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
-            build-times.md
-            build/.ninja_log
-          include-hidden-files: true
           compression-level: 0
           retention-days: 7
 
@@ -283,7 +231,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, $env:ALLOCATOR allocator, /GS $env:SECURITY_COOKIES) by $env:HOST_COMPILER."
+          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, rpmalloc allocator, /GS-, ThinLTO) by clang-cl from $env:BOOTSTRAP_TAG."
           gh release create $env:GITHUB_REF_NAME $env:ASSET "$env:ASSET.sha256" `
             --repo $env:GITHUB_REPOSITORY `
             --target $env:GITHUB_SHA `
