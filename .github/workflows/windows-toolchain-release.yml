@@ -27,17 +27,24 @@ on:
           - rpmalloc
           - crt
         default: rpmalloc
+      security_cookies:
+        description: 'Stack buffer security cookies (/GS) in the tools; off is smaller and faster'
+        type: choice
+        options:
+          - 'off'
+          - 'on'
+        default: 'off'
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-toolchain-release-${{ github.ref_name }}-${{ inputs.variant }}-${{ inputs.allocator }}
+  group: windows-toolchain-release-${{ github.ref_name }}-${{ inputs.variant }}-${{ inputs.allocator }}-${{ inputs.security_cookies }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build (${{ inputs.variant || 'clang-thinlto' }}, ${{ inputs.allocator || 'rpmalloc' }})
+    name: Build (${{ inputs.variant || 'clang-thinlto' }}, ${{ inputs.allocator || 'rpmalloc' }}, /GS ${{ inputs.security_cookies || 'off' }})
     if: github.repository == 'maj113/llvm-pe'
     runs-on: windows-2022
     timeout-minutes: 360
@@ -46,10 +53,11 @@ jobs:
     env:
       VARIANT: ${{ inputs.variant || 'clang-thinlto' }}
       ALLOCATOR: ${{ inputs.allocator || 'rpmalloc' }}
+      SECURITY_COOKIES: ${{ inputs.security_cookies || 'off' }}
       ASSET: llvm-pe-x86_64-windows.zip
       # The clang-cl variants build with this earlier release of the fork, not the runner's LLVM.
-      BOOTSTRAP_TAG: toolchain-2026.10.28
-      BOOTSTRAP_SHA256: 542e1b86799944c288f6dfac6e16507cea2d2c600d1cfeb18fa19cb884b4bcf4
+      BOOTSTRAP_TAG: toolchain-2026.10.28.1
+      BOOTSTRAP_SHA256: a683a8eb953bf3b360670be708b53bc8a32e249a7eca8d697c1be475d0b06d5d
     steps:
       - name: Validate tag
         if: github.event_name == 'push'
@@ -160,10 +168,15 @@ jobs:
             default { $options += '-DLLVM_PARALLEL_LINK_JOBS=2' }
           }
           if ($env:ALLOCATOR -eq 'rpmalloc') { $options += '-DLLVM_ENABLE_RPMALLOC=ON' }
+          # CMake prepends CFLAGS/CXXFLAGS to its default CMAKE_C_FLAGS/CMAKE_CXX_FLAGS, which
+          # every compile uses. Stack protection is a per-function attribute in the bitcode, so
+          # the LTO links follow it too.
+          if ($env:SECURITY_COOKIES -eq 'off') { $env:CFLAGS = '/GS-'; $env:CXXFLAGS = '/GS-' }
           $timer = [Diagnostics.Stopwatch]::StartNew()
           cmake -G Ninja -S llvm -B build @options
           if ($LASTEXITCODE -ne 0) { throw "cmake failed with exit code $LASTEXITCODE." }
           "CONFIGURE_SECONDS=$([int]$timer.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Select-String -LiteralPath 'build\CMakeCache.txt' -Pattern '^CMAKE_(C|CXX)_FLAGS(_RELEASE)?:' | ForEach-Object { $_.Line }
 
       - name: Build
         shell: pwsh
@@ -178,11 +191,11 @@ jobs:
           $seconds = [int]$timer.Elapsed.TotalSeconds
           # The final links, from the ninja log (start and end milliseconds per output).
           $links = foreach ($line in (Get-Content -LiteralPath 'build\.ninja_log' | Select-Object -Skip 1)) {
-            $start, $end, $null, $output = $line -split "`t"
+            $start, $end, $null, $output, $null = $line -split "`t"
             if ($output -match '^bin[\\/](clang|lld|llvm-ar)\.exe$') { "$output $([int](([long]$end - [long]$start) / 1000)) s" }
           }
           $summary = @(
-            "### $env:VARIANT, $env:ALLOCATOR",
+            "### $env:VARIANT, $env:ALLOCATOR, /GS $env:SECURITY_COOKIES",
             "- Host compiler: $env:HOST_COMPILER",
             "- Runner: $env:ImageOS $env:ImageVersion, $processors logical processors, $memory GiB, ninja -j $jobs",
             "- Configure: $env:CONFIGURE_SECONDS s; build: $seconds s",
@@ -254,7 +267,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: llvm-pe-${{ env.VARIANT }}-${{ env.ALLOCATOR }}
+          name: llvm-pe-${{ env.VARIANT }}-${{ env.ALLOCATOR }}-gs-${{ env.SECURITY_COOKIES }}
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
@@ -270,7 +283,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, $env:ALLOCATOR allocator) by $env:HOST_COMPILER."
+          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, $env:ALLOCATOR allocator, /GS $env:SECURITY_COOKIES) by $env:HOST_COMPILER."
           gh release create $env:GITHUB_REF_NAME $env:ASSET "$env:ASSET.sha256" `
             --repo $env:GITHUB_REPOSITORY `
             --target $env:GITHUB_SHA `
