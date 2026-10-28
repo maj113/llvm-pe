@@ -202,8 +202,8 @@ static void findPartitions(Module &M, ClusterIDMapType &ClusterIDMap,
   }
 }
 
-// Returns whether GV should be in partition (0-based) I of N.
-static bool isInPartition(const GlobalValue *GV, unsigned I, unsigned N) {
+// Returns the partition (0-based) of N that GV is assigned to by name hash.
+static unsigned getHashPartition(const GlobalValue *GV, unsigned N) {
   if (const GlobalObject *Root = getGVPartitioningRoot(GV))
     GV = Root;
 
@@ -220,7 +220,82 @@ static bool isInPartition(const GlobalValue *GV, unsigned I, unsigned N) {
   MD5::MD5Result R;
   H.update(Name);
   H.final(R);
-  return (R[0] | (R[1] << 8)) % N == I;
+  return (R[0] | (R[1] << 8)) % N;
+}
+
+// Returns the partition (0-based) of N that GV should be in.
+static unsigned getPartition(const GlobalValue *GV,
+                             const ClusterIDMapType &ClusterIDMap, unsigned N) {
+  if (auto It = ClusterIDMap.find(GV); It != ClusterIDMap.end())
+    return It->second;
+  return getHashPartition(GV, N);
+}
+
+// Returns whether C is plain data: it references no global value, block
+// address or other symbol, so it means the same thing in every partition.
+static bool isPlainData(const Constant *C,
+                        SmallPtrSetImpl<const Constant *> &Visited) {
+  if (isa<ConstantData>(C))
+    return true;
+  if (!isa<ConstantAggregate>(C) && !isa<ConstantExpr>(C))
+    return false;
+  if (!Visited.insert(C).second)
+    return true;
+  for (const Use &Op : C->operands())
+    if (!isPlainData(cast<Constant>(Op), Visited))
+      return false;
+  return true;
+}
+
+// Returns whether partitions that read GV but do not own it can be given an
+// available_externally copy of it. The copy is not emitted, so references
+// still resolve to the single definition in the owning partition, but codegen
+// there can fold reads of the initializer (e.g. a memcpy from a string literal
+// becomes immediate stores), as it could before the module was split.
+static bool isCopyableConstant(const GlobalVariable &GV) {
+  if (!GV.isConstant() || !GV.hasDefinitiveInitializer() ||
+      GV.hasLocalLinkage() || GV.isThreadLocal() ||
+      GV.getName().starts_with("llvm."))
+    return false;
+  SmallPtrSet<const Constant *, 8> Visited;
+  return isPlainData(GV.getInitializer(), Visited);
+}
+
+// Collects, for each partition, the copyable constant globals that functions
+// in the partition read but that are defined in another partition.
+static void findConstantCopies(
+    Module &M, const ClusterIDMapType &ClusterIDMap, unsigned N,
+    SmallVectorImpl<SmallVector<GlobalVariable *, 0>> &ConstantCopies) {
+  DenseMap<const Function *, unsigned> FunctionPartitions;
+  SmallVector<unsigned, 4> Readers;
+  SmallVector<const User *, 4> Worklist;
+  for (GlobalVariable &GV : M.globals()) {
+    if (!isCopyableConstant(GV))
+      continue;
+    unsigned Owner = getPartition(&GV, ClusterIDMap, N);
+    Readers.clear();
+    Worklist.assign(GV.user_begin(), GV.user_end());
+    while (!Worklist.empty()) {
+      const User *U = Worklist.pop_back_val();
+      if (isa<Constant>(U) && !isa<GlobalValue>(U)) {
+        Worklist.append(U->user_begin(), U->user_end());
+        continue;
+      }
+      const auto *I = dyn_cast<Instruction>(U);
+      if (!I)
+        continue;
+      const Function *F = I->getFunction();
+      auto [It, Inserted] = FunctionPartitions.try_emplace(F);
+      if (Inserted)
+        It->second = getPartition(F, ClusterIDMap, N);
+      if (It->second != Owner)
+        Readers.push_back(It->second);
+    }
+    llvm::sort(Readers);
+    Readers.erase(llvm::unique(Readers), Readers.end());
+    for (unsigned P : Readers)
+      ConstantCopies[P].push_back(&GV);
+  }
 }
 
 void llvm::SplitModule(
@@ -245,9 +320,10 @@ void llvm::SplitModule(
 
   // Find functions not mapped to modules in ClusterIDMap and count functions
   // per module. Map unmapped functions using round-robin so that they skip
-  // being distributed by isInPartition() based on function name hashes below.
-  // This provides better uniformity of distribution of functions to modules
-  // in some cases - for example when the number of functions equals to N.
+  // being distributed by getHashPartition() based on function name hashes
+  // below. This provides better uniformity of distribution of functions to
+  // modules in some cases - for example when the number of functions equals
+  // to N.
   if (RoundRobin) {
     DenseMap<unsigned, unsigned> ModuleFunctionCount;
     SmallVector<const GlobalValue *> UnmappedFunctions;
@@ -278,6 +354,9 @@ void llvm::SplitModule(
     }
   }
 
+  SmallVector<SmallVector<GlobalVariable *, 0>> ConstantCopies(N);
+  findConstantCopies(M, ClusterIDMap, N, ConstantCopies);
+
   // FIXME: We should be able to reuse M as the last partition instead of
   // cloning it. Note that the callers at the moment expect the module to
   // be preserved, so will need some adjustments as well.
@@ -285,11 +364,14 @@ void llvm::SplitModule(
     ValueToValueMapTy VMap;
     std::unique_ptr<Module> MPart(
         CloneModule(M, VMap, [&](const GlobalValue *GV) {
-          if (auto It = ClusterIDMap.find(GV); It != ClusterIDMap.end())
-            return It->second == I;
-          else
-            return isInPartition(GV, I, N);
+          return getPartition(GV, ClusterIDMap, N) == I;
         }));
+    // The initializers are plain data, so they need no remapping.
+    for (GlobalVariable *GV : ConstantCopies[I]) {
+      auto *Copy = cast<GlobalVariable>(VMap[GV]);
+      Copy->setInitializer(GV->getInitializer());
+      Copy->setLinkage(GlobalValue::AvailableExternallyLinkage);
+    }
     if (I != 0)
       MPart->removeModuleInlineAsm();
     ModuleCallback(std::move(MPart));
