@@ -1,5 +1,8 @@
-# Builds the x86-64 Windows clang/lld toolchain from this fork and publishes it
-# as a GitHub release asset.
+# Builds the x86-64 Windows toolchain MaiCord uses (clang-cl, lld-link and
+# llvm-lib with clang's core, x86 and Windows resource headers) from this fork.
+# A toolchain-* tag push publishes it as a GitHub release. A manual run builds
+# the chosen host-compiler variant at the dispatched commit and uploads it as a
+# workflow artifact instead, so variants can be measured without a release.
 name: Windows toolchain release
 
 on:
@@ -8,35 +11,52 @@ on:
       - 'toolchain-*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag to create at the dispatched commit (toolchain-YYYY.MM.DD)'
-        required: true
-        type: string
+      variant:
+        description: 'Host compiler: clang-cl from the bootstrap release (ThinLTO, full LTO or no LTO) or MSVC'
+        type: choice
+        options:
+          - clang-thinlto
+          - clang-fulllto
+          - clang
+          - msvc
+        default: clang-thinlto
+      allocator:
+        description: 'Heap allocator linked into the tools'
+        type: choice
+        options:
+          - rpmalloc
+          - crt
+        default: rpmalloc
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-toolchain-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  group: windows-toolchain-release-${{ github.ref_name }}-${{ inputs.variant }}-${{ inputs.allocator }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build and publish
+    name: Build (${{ inputs.variant || 'clang-thinlto' }}, ${{ inputs.allocator || 'rpmalloc' }})
     if: github.repository == 'maj113/llvm-pe'
     runs-on: windows-2022
     timeout-minutes: 360
     permissions:
       contents: write # gh release create
     env:
-      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      VARIANT: ${{ inputs.variant || 'clang-thinlto' }}
+      ALLOCATOR: ${{ inputs.allocator || 'rpmalloc' }}
       ASSET: llvm-pe-x86_64-windows.zip
+      # The clang-cl variants build with this earlier release of the fork, not the runner's LLVM.
+      BOOTSTRAP_TAG: toolchain-2026.10.28
+      BOOTSTRAP_SHA256: 542e1b86799944c288f6dfac6e16507cea2d2c600d1cfeb18fa19cb884b4bcf4
     steps:
       - name: Validate tag
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -notmatch '^toolchain-[0-9A-Za-z._-]+$') {
-            throw "Release tag '$env:RELEASE_TAG' must look like toolchain-YYYY.MM.DD."
+          if ($env:GITHUB_REF_NAME -notmatch '^toolchain-[0-9A-Za-z._-]+$') {
+            throw "Release tag '$env:GITHUB_REF_NAME' must look like toolchain-YYYY.MM.DD."
           }
 
       - name: Checkout
@@ -69,43 +89,107 @@ jobs:
             }
           }
 
+      - name: Fetch the bootstrap toolchain
+        if: env.VARIANT != 'msvc'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $download = Join-Path $env:RUNNER_TEMP 'bootstrap-download'
+          gh release download $env:BOOTSTRAP_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:ASSET --dir $download
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed with exit code $LASTEXITCODE." }
+          $archive = Join-Path $download $env:ASSET
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($hash -ne $env:BOOTSTRAP_SHA256.ToUpperInvariant()) {
+            throw "$env:ASSET from $env:BOOTSTRAP_TAG hashes to $hash, not $env:BOOTSTRAP_SHA256."
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'bootstrap'
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          $bin = Join-Path $root 'bin'
+          & (Join-Path $bin 'clang-cl.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'The bootstrap clang-cl does not run.' }
+          "HOST_LLVM_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Configure
         shell: pwsh
         run: |
-          where.exe cl
           ninja --version
           cmake --version | Select-Object -First 1
-          cmake -G Ninja -S llvm -B build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-            -DLLVM_ENABLE_PROJECTS="clang;lld" `
-            -DLLVM_TARGETS_TO_BUILD=X86 `
-            -DLLVM_ENABLE_ASSERTIONS=OFF `
-            -DLLVM_INCLUDE_TESTS=OFF `
-            -DLLVM_INCLUDE_BENCHMARKS=OFF `
-            -DLLVM_INCLUDE_EXAMPLES=OFF `
-            -DLLVM_INCLUDE_DOCS=OFF `
-            -DCLANG_INCLUDE_TESTS=OFF `
-            -DCLANG_INCLUDE_DOCS=OFF `
-            -DCLANG_ENABLE_CIR=OFF `
-            -DLLD_ENABLE_ELF=OFF `
-            -DLLD_ENABLE_MACHO=OFF `
-            -DLLD_ENABLE_MINGW=OFF `
-            -DLLD_ENABLE_WASM=OFF `
-            -DLLVM_ENABLE_DIA_SDK=OFF `
-            -DLLVM_ENABLE_LIBXML2=OFF `
-            -DLLVM_ENABLE_ZLIB=OFF `
-            -DLLVM_ENABLE_ZSTD=OFF `
-            -DLLVM_PARALLEL_LINK_JOBS=2
+          $options = @(
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            '-DLLVM_ENABLE_PROJECTS=clang;lld',
+            '-DLLVM_TARGETS_TO_BUILD=X86',
+            '-DLLVM_ENABLE_ASSERTIONS=OFF',
+            '-DLLVM_INCLUDE_TESTS=OFF',
+            '-DLLVM_INCLUDE_BENCHMARKS=OFF',
+            '-DLLVM_INCLUDE_EXAMPLES=OFF',
+            '-DLLVM_INCLUDE_DOCS=OFF',
+            '-DCLANG_INCLUDE_TESTS=OFF',
+            '-DCLANG_INCLUDE_DOCS=OFF',
+            '-DCLANG_ENABLE_CIR=OFF',
+            '-DCLANG_ENABLE_STATIC_ANALYZER=OFF',
+            '-DCLANG_ENABLE_OBJC_REWRITER=OFF',
+            '-DLLD_ENABLE_ELF=OFF',
+            '-DLLD_ENABLE_MACHO=OFF',
+            '-DLLD_ENABLE_MINGW=OFF',
+            '-DLLD_ENABLE_WASM=OFF',
+            '-DLLVM_ENABLE_DIA_SDK=OFF',
+            '-DLLVM_ENABLE_LIBXML2=OFF',
+            '-DLLVM_ENABLE_ZLIB=OFF',
+            '-DLLVM_ENABLE_ZSTD=OFF')
+          if ($env:VARIANT -eq 'msvc') {
+            $cl = (Get-Command cl.exe).Source
+            $compiler = "MSVC $([Diagnostics.FileVersionInfo]::GetVersionInfo($cl).ProductVersion) ($cl)"
+            $options += '-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl'
+          } else {
+            $clang = Join-Path $env:HOST_LLVM_BIN 'clang-cl.exe'
+            $compiler = (& $clang --version | Out-String).Split("`n")[0].Trim()
+            # Visual Studio's mt, not an llvm-mt the runner image may have on PATH.
+            $options += "-DCMAKE_C_COMPILER=$clang", "-DCMAKE_CXX_COMPILER=$clang",
+              "-DCMAKE_LINKER=$(Join-Path $env:HOST_LLVM_BIN 'lld-link.exe')",
+              "-DCMAKE_AR=$(Join-Path $env:HOST_LLVM_BIN 'llvm-lib.exe')",
+              "-DCMAKE_MT=$((Get-Command mt.exe).Source)"
+          }
+          "HOST_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Two concurrent LTO links of clang and lld need more memory than a runner has.
+          switch ($env:VARIANT) {
+            'clang-thinlto' { $options += '-DLLVM_ENABLE_LTO=Thin', '-DLLVM_PARALLEL_LINK_JOBS=2' }
+            'clang-fulllto' { $options += '-DLLVM_ENABLE_LTO=Full', '-DLLVM_PARALLEL_LINK_JOBS=1' }
+            default { $options += '-DLLVM_PARALLEL_LINK_JOBS=2' }
+          }
+          if ($env:ALLOCATOR -eq 'rpmalloc') { $options += '-DLLVM_ENABLE_RPMALLOC=ON' }
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          cmake -G Ninja -S llvm -B build @options
           if ($LASTEXITCODE -ne 0) { throw "cmake failed with exit code $LASTEXITCODE." }
+          "CONFIGURE_SECONDS=$([int]$timer.Elapsed.TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build
         shell: pwsh
         run: |
-          ninja -C build clang lld llvm-lib llvm-ar llvm-rc llvm-ml
+          $processors = [Environment]::ProcessorCount
+          $memory = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+          $jobs = $processors + 2 # ninja's default
+          Write-Host "$((Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()), $processors logical processors, $memory GiB, ninja -j $jobs"
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          ninja -C build -j $jobs clang lld llvm-ar
           if ($LASTEXITCODE -ne 0) { throw "ninja failed with exit code $LASTEXITCODE." }
+          $seconds = [int]$timer.Elapsed.TotalSeconds
+          # The final links, from the ninja log (start and end milliseconds per output).
+          $links = foreach ($line in (Get-Content -LiteralPath 'build\.ninja_log' | Select-Object -Skip 1)) {
+            $start, $end, $null, $output = $line -split "`t"
+            if ($output -match '^bin[\\/](clang|lld|llvm-ar)\.exe$') { "$output $([int](([long]$end - [long]$start) / 1000)) s" }
+          }
+          $summary = @(
+            "### $env:VARIANT, $env:ALLOCATOR",
+            "- Host compiler: $env:HOST_COMPILER",
+            "- Runner: $env:ImageOS $env:ImageVersion, $processors logical processors, $memory GiB, ninja -j $jobs",
+            "- Configure: $env:CONFIGURE_SECONDS s; build: $seconds s",
+            "- Final links: $($links -join '; ')")
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $summary | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE 'build-times.md') -Encoding utf8
+          $summary | Write-Host
 
       - name: Package
         shell: pwsh
@@ -114,30 +198,50 @@ jobs:
           $build = Join-Path $env:GITHUB_WORKSPACE 'build'
           $stage = Join-Path $env:RUNNER_TEMP 'llvm-pe'
           $bin = New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin')
-          $resource = @(Get-ChildItem -LiteralPath (Join-Path $build 'lib\clang') -Directory)
-          if ($resource.Count -ne 1) { throw "Expected one clang resource directory, found $($resource.Count)." }
-          $major = $resource[0].Name
-          $tools = @{
-            'clang.exe' = 'clang.exe'
+          # Only what MaiCord runs. clang-cl, lld-link and llvm-lib pick their mode from the
+          # executable name, so each is a renamed copy of the multi-call binary.
+          $tools = [ordered]@{
             'clang-cl.exe' = 'clang.exe'
             'lld-link.exe' = 'lld.exe'
-            'llvm-lib.exe' = 'llvm-lib.exe'
-            'llvm-ar.exe' = 'llvm-ar.exe'
-            'llvm-rc.exe' = 'llvm-rc.exe'
-            'llvm-ml.exe' = 'llvm-ml.exe'
+            'llvm-lib.exe' = 'llvm-ar.exe'
           }
           foreach ($tool in $tools.GetEnumerator()) {
             Copy-Item -LiteralPath (Join-Path $build "bin\$($tool.Value)") -Destination (Join-Path $bin $tool.Key)
           }
-          $include = New-Item -ItemType Directory -Force -Path (Join-Path $stage "lib\clang\$major")
-          Copy-Item -Recurse -LiteralPath (Join-Path $resource[0].FullName 'include') -Destination $include
+          # clang's resource headers for x86-64 Windows: the freestanding C headers, the x86
+          # intrinsics, and the intrin.h/vadefs.h wrappers over the MSVC headers.
+          foreach ($component in 'core', 'x86', 'windows', 'utility') {
+            cmake --install $build --prefix $stage --component "$component-resource-headers"
+            if ($LASTEXITCODE -ne 0) { throw "Installing the $component resource headers failed with exit code $LASTEXITCODE." }
+          }
+          $include = @(Get-ChildItem -Path (Join-Path $stage 'lib\clang\*\include') -Directory)
+          if ($include.Count -ne 1) { throw "Expected one clang resource include directory, found $($include.Count)." }
           Copy-Item -LiteralPath 'llvm\LICENSE.TXT' -Destination (Join-Path $stage 'LICENSE.TXT')
           foreach ($project in 'llvm', 'clang', 'lld') {
             $dir = New-Item -ItemType Directory -Force -Path (Join-Path $stage "licenses\$project")
             Copy-Item -LiteralPath "$project\LICENSE.TXT" -Destination $dir
           }
+
+          # The packaged tools compile against the SDK headers, archive and link.
+          $smoke = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'smoke')
+          $source = Join-Path $smoke 'smoke.c'
+          Set-Content -LiteralPath $source -Value @(
+            '#include <intrin.h>',
+            '#include <immintrin.h>',
+            '#include <stddef.h>',
+            '#include <stdio.h>',
+            'int main(void) { int info[4]; __cpuid(info, 0); __m128i v = _mm_set1_epi32(info[0]); printf("%d\n", _mm_cvtsi128_si32(v) == info[0]); return 0; }')
           & (Join-Path $bin 'clang-cl.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'The packaged clang-cl does not run.' }
+          & (Join-Path $bin 'clang-cl.exe') /nologo /O2 /c $source "/Fo$smoke\smoke.obj"
+          if ($LASTEXITCODE -ne 0) { throw 'The packaged clang-cl cannot compile against the SDK headers.' }
+          & (Join-Path $bin 'llvm-lib.exe') /nologo "/out:$smoke\smoke.lib" "$smoke\smoke.obj"
+          if ($LASTEXITCODE -ne 0) { throw 'The packaged llvm-lib failed.' }
+          & (Join-Path $bin 'lld-link.exe') /nologo /subsystem:console "/out:$smoke\smoke.exe" "$smoke\smoke.lib" /include:main
+          if ($LASTEXITCODE -ne 0) { throw 'The packaged lld-link failed.' }
+          $result = & "$smoke\smoke.exe"
+          if ($LASTEXITCODE -ne 0 -or $result -ne '1') { throw "The smoke test printed '$result' (exit code $LASTEXITCODE)." }
+
           $zip = Join-Path $env:GITHUB_WORKSPACE $env:ASSET
           # 7-Zip writes portable '/' entry separators; Expand-Archive and unzip both read them.
           7z a -tzip -mx=9 $zip (Join-Path $stage '*')
@@ -146,15 +250,30 @@ jobs:
           [IO.File]::WriteAllText("$zip.sha256", $hash)
           Write-Host "$env:ASSET SHA-256: $hash"
 
+      - name: Upload the measurement build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: llvm-pe-${{ env.VARIANT }}-${{ env.ALLOCATOR }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+            build-times.md
+            build/.ninja_log
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
+
       - name: Publish release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Windows x86-64 clang/lld toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime)."
-          gh release create $env:RELEASE_TAG $env:ASSET "$env:ASSET.sha256" `
+          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, $env:ALLOCATOR allocator) by $env:HOST_COMPILER."
+          gh release create $env:GITHUB_REF_NAME $env:ASSET "$env:ASSET.sha256" `
             --repo $env:GITHUB_REPOSITORY `
             --target $env:GITHUB_SHA `
-            --title $env:RELEASE_TAG `
+            --title $env:GITHUB_REF_NAME `
             --notes $notes
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE." }
