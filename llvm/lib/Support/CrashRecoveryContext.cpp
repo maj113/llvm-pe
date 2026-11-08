@@ -13,6 +13,7 @@
 #include "llvm/Support/ExitCodes.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/thread.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cassert>
 #include <mutex>
 #include <setjmp.h>
@@ -22,15 +23,16 @@
 
 // llvm-pe: without unwind tables (LLVM_PE_NO_UNWIND_TABLES), SEH cannot unwind
 // through LLVM's frames, so the exception HandleExit raises would never reach
-// RunSafely's __except and the process would die with it. RunSafely sets a
-// __builtin_setjmp buffer instead, which needs no unwind information, and
-// HandleExit jumps back to it; that covers every exit through a recovery
-// context (fatal errors in an in-process cc1, lld's fatal() under
-// safeLldMain). Crashes cannot be recovered from in such a build.
+// RunSafely's __except and the process would die with it. HandleExit instead
+// does what the exception filter and the end of the process would do (the
+// stack dump and the removal of output files, then flushing the standard
+// streams) and ends the process with the exit code; that covers every exit
+// through a recovery context (fatal errors in an in-process cc1, lld's fatal()
+// under safeLldMain). Crashes cannot be recovered from in such a build.
 #if defined(_MSC_VER) && LLVM_PE_NO_UNWIND_TABLES
-#define LLVM_PE_EXIT_BY_JUMP 1
+#define LLVM_PE_EXIT_DIRECTLY 1
 #else
-#define LLVM_PE_EXIT_BY_JUMP 0
+#define LLVM_PE_EXIT_DIRECTLY 0
 #endif
 
 using namespace llvm;
@@ -49,9 +51,6 @@ struct CrashRecoveryContextImpl {
 
   CrashRecoveryContext *CRC;
   ::jmp_buf JumpBuffer;
-#if LLVM_PE_EXIT_BY_JUMP
-  void *ExitBuffer[5];
-#endif
   volatile unsigned Failed : 1;
   unsigned SwitchedThread : 1;
   unsigned ValidJumpBuffer : 1;
@@ -93,13 +92,8 @@ public:
     CRC->RetCode = RetCode;
 
     // Jump back to the RunSafely we were called under.
-    if (ValidJumpBuffer) {
-#if LLVM_PE_EXIT_BY_JUMP
-      __builtin_longjmp(ExitBuffer, 1);
-#else
+    if (ValidJumpBuffer)
       longjmp(JumpBuffer, 1);
-#endif
-    }
 
     // Otherwise let the caller decide of the outcome of the crash. Currently
     // this occurs when using SEH on Windows with MSVC or clang-cl.
@@ -223,22 +217,6 @@ static void
 installExceptionOrSignalHandlers(bool NeedsPOSIXUtilitySignalHandling) {}
 static void uninstallExceptionOrSignalHandlers() {}
 
-#if LLVM_PE_EXIT_BY_JUMP
-bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
-  if (!gCrashRecoveryEnabled) {
-    Fn();
-    return true;
-  }
-  assert(!Impl && "Crash recovery context already initialized!");
-  CrashRecoveryContextImpl *CRCI = new CrashRecoveryContextImpl(this);
-  Impl = CRCI;
-  CRCI->ValidJumpBuffer = true;
-  if (__builtin_setjmp(CRCI->ExitBuffer) != 0)
-    return false;
-  Fn();
-  return true;
-}
-#else
 // We need this function because the call to GetExceptionInformation() can only
 // occur inside the __except evaluation block
 static int ExceptionFilter(_EXCEPTION_POINTERS *Except) {
@@ -281,7 +259,6 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
   }
   return true;
 }
-#endif
 
 #else // !_MSC_VER
 
@@ -487,17 +464,21 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
 #endif // !_MSC_VER
 
 [[noreturn]] void CrashRecoveryContext::HandleExit(int RetCode) {
-#if LLVM_PE_EXIT_BY_JUMP
-  // Hand the exit to the recovery context as the exception filter would, with
-  // the exception record it would have seen, and jump back to RunSafely.
-  EXCEPTION_RECORD Record = {};
-  Record.ExceptionCode = 0xE0000000 | RetCode;
-  CONTEXT Context;
-  ::RtlCaptureContext(&Context);
-  EXCEPTION_POINTERS Pointers = {&Record, &Context};
-  CrashRecoveryContextImpl *CRCI = (CrashRecoveryContextImpl *)Impl;
-  assert(CRCI && "Crash recovery context never initialized!");
-  CRCI->HandleCrash(RetCode, reinterpret_cast<uintptr_t>(&Pointers));
+#if LLVM_PE_EXIT_DIRECTLY
+  // What the exception filter would do with the exception HandleExit raises
+  // otherwise (the stack dump and the removal of output files, given the record
+  // it would see), then the end of the process with the exit code.
+  if (DumpStackAndCleanupOnFailure) {
+    EXCEPTION_RECORD Record = {};
+    Record.ExceptionCode = 0xE0000000 | RetCode;
+    CONTEXT Context;
+    ::RtlCaptureContext(&Context);
+    EXCEPTION_POINTERS Pointers = {&Record, &Context};
+    sys::CleanupOnSignal(reinterpret_cast<uintptr_t>(&Pointers));
+  }
+  outs().flush();
+  errs().flush();
+  ::ExitProcess(RetCode);
 #elif defined(_WIN32)
   // Since the exception code is actually of NTSTATUS type, we use the
   // Microsoft-recommended 0xE prefix, to signify that this is a user error.

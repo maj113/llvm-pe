@@ -1,14 +1,24 @@
-; REQUIRES: llvm-pe-no-unwind-tables, x86-registered-target
+; REQUIRES: llvm-pe-no-unwind-tables, system-windows, x86-registered-target
 
-; llvm-pe: in a build without unwind tables, a fatal error in an in-process
-; cc1 still leaves through its CrashRecoveryContext back to the driver, which
-; reports the frontend's exit code 70 as a build with unwind tables does.
+; llvm-pe: in a Windows build without unwind tables, a fatal error in an
+; in-process cc1 ends the process from its CrashRecoveryContext with cc1's own
+; exit code 70, after the stack dump, instead of an exception that cannot be
+; dispatched (0xE0000046) or an access violation. The driver does not get to
+; report the failed frontend command.
 
-; RUN: not %clang --target=x86_64-pc-windows-msvc -fintegrated-cc1 \
-; RUN:   -fno-crash-diagnostics -c -x ir %s -o %t.o 2>&1 | FileCheck %s
+; RUN: %python %S/Inputs/llvm-pe-exit-code.py %clang --target=x86_64-pc-windows-msvc \
+; RUN:   -fintegrated-cc1 -fno-crash-diagnostics -c -x ir %s -o %t.o 2>&1 | FileCheck %s
+; RUN: %python %S/Inputs/llvm-pe-exit-code.py %clang --target=x86_64-pc-windows-msvc \
+; RUN:   -fintegrated-cc1 -fno-crash-diagnostics -c -x c %S/Inputs/llvm-pe-thread-pointer.c \
+; RUN:   -o %t.o 2>&1 | FileCheck %s --check-prefix=THREAD-POINTER
 
 ; CHECK: fatal error: error in backend: Cannot select
-; CHECK: error: clang frontend command failed with exit code 70
+; CHECK-NOT: frontend command failed
+; CHECK: exit code 70
+
+; THREAD-POINTER: fatal error: error in backend: Target OS doesn't support __builtin_thread_pointer() yet.
+; THREAD-POINTER-NOT: frontend command failed
+; THREAD-POINTER: exit code 70
 
 define i16 @f() {
   %r = call { i16, i32 } @llvm.x86.rdrand.16()
