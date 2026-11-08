@@ -36,6 +36,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cstdlib>
@@ -1580,6 +1581,15 @@ bool X86FrameLowering::has128ByteRedZone(const MachineFunction &MF) const {
   if (Fn.getCallingConv() == X86::InternalCC)
     return false;
   return Is64Bit && !IsWin64CC && !Fn.hasFnAttribute(Attribute::NoRedZone);
+}
+
+static cl::opt<bool> IPRANoCSR(
+    "x86-ipra-nocsr", cl::init(true),
+    cl::desc("Under IPRA, let local functions skip callee-saved registers "
+             "(llvm-pe; false keeps IPRA to register masks)"));
+
+bool X86FrameLowering::isProfitableForNoCSROpt(const Function &F) const {
+  return IPRANoCSR;
 }
 
 bool X86FrameLowering::needsDwarfCFI(const MachineFunction &MF) const {

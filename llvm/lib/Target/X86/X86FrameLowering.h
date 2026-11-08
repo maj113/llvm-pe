@@ -238,6 +238,11 @@ public:
   /// frame of the top of stack function) as part of it's ABI.
   bool has128ByteRedZone(const MachineFunction& MF) const;
 
+  /// llvm-pe: -x86-ipra-nocsr=false keeps IPRA to register masks (callers
+  /// learn which scratch registers a callee leaves alone) without letting
+  /// callees drop callee-saved registers.
+  bool isProfitableForNoCSROpt(const Function &F) const override;
+
 protected:
   bool hasFPImpl(const MachineFunction &MF) const override;
 
