@@ -19,6 +19,7 @@
 #include "Writer.h"
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/Timer.h"
+#include "llvm/ADT/DenseMap.h"
 
 namespace lld::coff {
 
@@ -63,6 +64,9 @@ public:
   std::map<std::string, PDBInputFile *> pdbInputFileInstances;
   std::vector<ImportFile *> importFileInstances;
   std::int64_t consumedInputsSize = 0;
+
+  llvm::DenseMap<const SectionChunk *, llvm::SmallVector<X64JumpRelaxation, 1>>
+      x64JumpRelaxations;
 
   MergeChunk *mergeChunkInstances[Log2MaxSectionAlignment + 1] = {};
 

@@ -21,6 +21,7 @@
 #include "lld/Common/Memory.h"
 #include "lld/Common/Timer.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/BinaryFormat/COFF.h"
@@ -220,6 +221,8 @@ private:
   void mergeSection(const std::map<StringRef, StringRef>::value_type &p);
   void mergeSections();
   void sortECChunks();
+  void prepareX64BranchRelaxation();
+  bool relaxX64Jumps();
   void appendECImportTables();
   void removeUnusedSections();
   void layoutSections();
@@ -529,7 +532,8 @@ bool Writer::createThunks(OutputSection *os, int margin) {
       // but we don't know whether the target Symbol address should be
       // offset by thunksSize or not (or by some of thunksSize but not all of
       // it), giving us some uncertainty once we have added one thunk.
-      uint64_t p = sc->getRVA() + rel.VirtualAddress + thunksSize;
+      uint64_t p = sc->getRVA() + sc->getOutputOffset(rel.VirtualAddress) +
+                   thunksSize;
 
       Defined *sym = dyn_cast_or_null<Defined>(relocTarget);
       if (!sym)
@@ -657,7 +661,7 @@ bool Writer::verifyRanges(const std::vector<Chunk *> chunks) {
       if (!sym)
         continue;
 
-      uint64_t p = sc->getRVA() + rel.VirtualAddress;
+      uint64_t p = sc->getRVA() + sc->getOutputOffset(rel.VirtualAddress);
       uint64_t s = sym->getRVA();
 
       if (!isInRange(rel.Type, s, p, 0, machine))
@@ -670,6 +674,11 @@ bool Writer::verifyRanges(const std::vector<Chunk *> chunks) {
 // Assign addresses and add thunks if necessary.
 void Writer::finalizeAddresses() {
   assignAddresses();
+  if (ctx.config.branchRelax && ctx.config.machine == AMD64) {
+    while (relaxX64Jumps())
+      assignAddresses();
+    return;
+  }
   if (ctx.config.machine != ARMNT && !isAnyArm64(ctx.config.machine))
     return;
 
@@ -794,6 +803,7 @@ void Writer::run() {
     createExportTable();
     mergeSections();
     sortECChunks();
+    prepareX64BranchRelaxation();
     appendECImportTables();
     createDynamicRelocs();
     removeUnusedSections();
@@ -1805,6 +1815,211 @@ void Writer::sortECChunks() {
         return bType && (!aType || *aType < *bType);
       });
   }
+}
+
+namespace {
+
+struct X64Jump {
+  SectionChunk *target;
+  DefinedRegular *targetSym;
+  uint32_t relocIndex;
+  uint32_t offset;
+  int32_t addend;
+};
+
+static bool isRelaxableTextChunk(Chunk *chunk) {
+  auto *sc = dyn_cast<SectionChunk>(chunk);
+  return sc && sc->live && sc->hasData && sc->getMachine() == AMD64 &&
+         sc->getSectionName() == ".text" && sc->getAlignment() == 1 &&
+         !sc->isHotPatchable();
+}
+
+static std::optional<X64Jump> getX64Jump(SectionChunk *source,
+                                         uint32_t relocIndex) {
+  ArrayRef<coff_relocation> relocs = source->getRelocs();
+  if (relocIndex >= relocs.size())
+    return std::nullopt;
+  const coff_relocation &rel = relocs[relocIndex];
+  if (rel.Type != IMAGE_REL_AMD64_REL32)
+    return std::nullopt;
+
+  ArrayRef<uint8_t> contents = source->getContents();
+  if (rel.VirtualAddress < 1 || rel.VirtualAddress + 4 > contents.size() ||
+      contents[rel.VirtualAddress - 1] != 0xe9)
+    return std::nullopt;
+
+  auto *targetSym = dyn_cast_or_null<DefinedRegular>(
+      source->file->getSymbol(rel.SymbolTableIndex));
+  if (!targetSym)
+    return std::nullopt;
+  SectionChunk *target = targetSym->getChunk();
+  if (!target || !target->live)
+    return std::nullopt;
+
+  return X64Jump{target,
+                 targetSym,
+                 relocIndex,
+                 rel.VirtualAddress - 1,
+                 int32_t(read32le(contents.data() + rel.VirtualAddress))};
+}
+
+static bool hasJumpRelaxation(SectionChunk *sc, uint32_t relocIndex) {
+  return llvm::any_of(sc->getX64JumpRelaxations(),
+                      [=](const X64JumpRelaxation &r) {
+                        return r.relocIndex == relocIndex;
+                      });
+}
+
+} // namespace
+
+// COFF has no relocation for an 8-bit x86 jump. Consequently, the assembler
+// must use rel32 whenever the destination is in another section. Form chains
+// only when at least one endpoint is small. A jump to the start of the
+// following chunk disappears; a jump to a nearby entry within that chunk
+// becomes rel8.
+void Writer::prepareX64BranchRelaxation() {
+  if (!ctx.config.branchRelax || ctx.config.machine != AMD64)
+    return;
+  if (ctx.config.debug || ctx.config.functionPadMin ||
+      ctx.config.hotpatchCompat || !ctx.config.order.empty()) {
+    Err(ctx) << "/opt:lldbranchrelax is incompatible with debug, hotpatch, or "
+                "explicit function ordering";
+    return;
+  }
+
+  for (OutputSection *sec : ctx.outputSections) {
+    for (size_t begin = 0; begin < sec->chunks.size();) {
+      while (begin < sec->chunks.size() &&
+             !isRelaxableTextChunk(sec->chunks[begin]))
+        ++begin;
+      size_t end = begin;
+      while (end < sec->chunks.size() &&
+             isRelaxableTextChunk(sec->chunks[end]))
+        ++end;
+      if (end - begin < 2) {
+        begin = end;
+        continue;
+      }
+
+      DenseSet<SectionChunk *> chunks;
+      for (size_t i = begin; i != end; ++i)
+        chunks.insert(cast<SectionChunk>(sec->chunks[i]));
+
+      DenseMap<SectionChunk *, SectionChunk *> next;
+      DenseMap<SectionChunk *, SectionChunk *> prev;
+      struct TailEdge {
+        SectionChunk *source;
+        uint32_t relocIndex;
+        uint32_t offset;
+        uint8_t outputSize;
+      };
+      SmallVector<TailEdge, 0> edges;
+
+      for (size_t i = begin; i != end; ++i) {
+        auto *source = cast<SectionChunk>(sec->chunks[i]);
+        uint32_t relocCount = source->getRelocs().size();
+        for (uint32_t relocIndex = 0; relocIndex != relocCount;
+             ++relocIndex) {
+          std::optional<X64Jump> jump = getX64Jump(source, relocIndex);
+          if (!jump || jump->offset + 5 != source->getContents().size() ||
+              jump->target == source || !chunks.contains(jump->target) ||
+              next.contains(source) || prev.contains(jump->target))
+            continue;
+
+          int64_t targetOffset =
+              int64_t(jump->targetSym->getValue()) + jump->addend;
+          uint32_t sourceSize = source->getContents().size();
+          uint32_t targetSize = jump->target->getContents().size();
+          if (targetOffset < 0 || uint64_t(targetOffset) >= targetSize)
+            continue;
+          if (sourceSize > 64 && (targetOffset != 0 || targetSize > 64))
+            continue;
+
+          uint8_t outputSize = targetOffset == 0 ? 0 : 2;
+          if (outputSize == 2 && !isInt<8>(targetOffset))
+            continue;
+
+          bool createsCycle = false;
+          for (SectionChunk *c = jump->target; c; c = next.lookup(c))
+            if (c == source) {
+              createsCycle = true;
+              break;
+            }
+          if (createsCycle)
+            continue;
+
+          next[source] = jump->target;
+          prev[jump->target] = source;
+          edges.push_back(
+              {source, jump->relocIndex, jump->offset, outputSize});
+        }
+      }
+
+      if (edges.empty()) {
+        begin = end;
+        continue;
+      }
+
+      SmallVector<Chunk *, 0> ordered;
+      DenseSet<SectionChunk *> emitted;
+      ordered.reserve(end - begin);
+      for (size_t i = begin; i != end; ++i) {
+        auto *head = cast<SectionChunk>(sec->chunks[i]);
+        while (SectionChunk *p = prev.lookup(head))
+          head = p;
+        if (emitted.contains(head))
+          continue;
+        for (SectionChunk *c = head; c; c = next.lookup(c)) {
+          if (!emitted.insert(c).second)
+            break;
+          ordered.push_back(c);
+        }
+      }
+      assert(ordered.size() == end - begin && "incomplete jump chain");
+      llvm::copy(ordered, sec->chunks.begin() + begin);
+
+      for (const TailEdge &edge : edges)
+        edge.source->addX64JumpRelaxation(
+            {edge.relocIndex, edge.offset, edge.outputSize});
+      begin = end;
+    }
+  }
+}
+
+// Once chunks have addresses, compact terminal cross-section jumps whose
+// destination is representable by the two-byte rel8 encoding. Restricting this
+// to the end of a chunk avoids shifting assembler-resolved local branches or
+// RIP-relative references, which have no COFF relocation for the linker to
+// update. Removing bytes cannot make an already-shortened jump leave rel8
+// range, so repeated address assignment converges monotonically.
+bool Writer::relaxX64Jumps() {
+  bool changed = false;
+  for (OutputSection *sec : ctx.outputSections) {
+    for (Chunk *chunk : sec->chunks) {
+      if (!isRelaxableTextChunk(chunk))
+        continue;
+      auto *source = cast<SectionChunk>(chunk);
+      uint32_t relocCount = source->getRelocs().size();
+      for (uint32_t relocIndex = 0; relocIndex != relocCount; ++relocIndex) {
+        if (hasJumpRelaxation(source, relocIndex))
+          continue;
+        std::optional<X64Jump> jump = getX64Jump(source, relocIndex);
+        if (!jump || jump->offset + 5 != source->getContents().size() ||
+            !llvm::is_contained(sec->chunks, jump->target))
+          continue;
+
+        uint64_t next =
+            source->getRVA() + source->getOutputOffset(jump->offset) + 2;
+        uint64_t target = jump->targetSym->getRVA() + jump->addend;
+        if (!isInt<8>(int64_t(target) - int64_t(next)))
+          continue;
+
+        source->addX64JumpRelaxation({jump->relocIndex, jump->offset, 2});
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 // Visits all sections to assign incremental, non-overlapping RVAs and

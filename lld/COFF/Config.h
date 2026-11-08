@@ -131,6 +131,7 @@ struct Configuration {
   bool doGC = true;
   ICFLevel doICF = ICFLevel::None;
   bool tailMerge;
+  bool branchRelax = false;
   bool relocatable = true;
   bool forceMultiple = false;
   bool forceMultipleRes = false;

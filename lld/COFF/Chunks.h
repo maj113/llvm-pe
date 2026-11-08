@@ -14,6 +14,7 @@
 #include "lld/Common/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/PointerIntPair.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/MC/StringTableBuilder.h"
@@ -39,6 +40,12 @@ class ObjFile;
 class OutputSection;
 class RuntimePseudoReloc;
 class Symbol;
+
+struct X64JumpRelaxation {
+  uint32_t relocIndex;
+  uint32_t offset;
+  uint8_t outputSize;
+};
 
 // Mask for permissions (discardable, writable, readable, executable, etc).
 const uint32_t permMask = 0xFE000000;
@@ -252,10 +259,14 @@ public:
 
   SectionChunk(ObjFile *file, const coff_section *header, Kind k = SectionKind);
   static bool classof(const Chunk *c) { return c->kind() <= SectionECKind; }
-  size_t getSize() const { return header->SizeOfRawData; }
+  size_t getSize() const;
   ArrayRef<uint8_t> getContents() const;
   void writeTo(uint8_t *buf) const;
   MachineTypes getMachine() const;
+
+  uint32_t getOutputOffset(uint32_t inputOffset) const;
+  ArrayRef<X64JumpRelaxation> getX64JumpRelaxations() const;
+  void addX64JumpRelaxation(X64JumpRelaxation relaxation);
 
   // Defend against unsorted relocations. This may be overly conservative.
   void sortRelocations();

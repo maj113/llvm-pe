@@ -2086,6 +2086,10 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
         tailMerge = 2;
       } else if (s == "nolldtailmerge") {
         tailMerge = 0;
+      } else if (s == "lldbranchrelax") {
+        config->branchRelax = true;
+      } else if (s == "nolldbranchrelax") {
+        config->branchRelax = false;
       } else if (s == "ltodebugpassmanager") {
         ltoDebugPM = true;
       } else if (s == "noltodebugpassmanager") {

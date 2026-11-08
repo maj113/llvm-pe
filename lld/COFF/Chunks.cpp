@@ -61,6 +61,53 @@ SectionChunk::SectionChunk(ObjFile *f, const coff_section *h, Kind k)
     live = true;
 }
 
+ArrayRef<X64JumpRelaxation> SectionChunk::getX64JumpRelaxations() const {
+  if (!file)
+    return {};
+  auto &relaxations = file->symtab.ctx.x64JumpRelaxations;
+  if (relaxations.empty())
+    return {};
+  auto it = relaxations.find(this);
+  if (it == relaxations.end())
+    return {};
+  return it->second;
+}
+
+void SectionChunk::addX64JumpRelaxation(X64JumpRelaxation relaxation) {
+  auto &relaxations = file->symtab.ctx.x64JumpRelaxations[this];
+  auto it = llvm::lower_bound(
+      relaxations, relaxation.offset,
+      [](const X64JumpRelaxation &r, uint32_t offset) {
+        return r.offset < offset;
+      });
+  assert((it == relaxations.end() || it->relocIndex != relaxation.relocIndex) &&
+         "jump relocation relaxed twice");
+  if (it != relaxations.begin())
+    assert(std::prev(it)->offset + 5 <= relaxation.offset &&
+           "overlapping jump relaxations");
+  if (it != relaxations.end())
+    assert(relaxation.offset + 5 <= it->offset &&
+           "overlapping jump relaxations");
+  relaxations.insert(it, relaxation);
+}
+
+uint32_t SectionChunk::getOutputOffset(uint32_t inputOffset) const {
+  uint32_t removed = 0;
+  for (const X64JumpRelaxation &r : getX64JumpRelaxations()) {
+    if (inputOffset < r.offset)
+      break;
+    if (inputOffset < r.offset + 5)
+      return r.offset - removed +
+             std::min(inputOffset - r.offset, uint32_t(r.outputSize));
+    removed += 5 - r.outputSize;
+  }
+  return inputOffset - removed;
+}
+
+size_t SectionChunk::getSize() const {
+  return getOutputOffset(header->SizeOfRawData);
+}
+
 MachineTypes SectionChunk::getMachine() const {
   MachineTypes machine = file->getMachineType();
   // On ARM64EC, the IMAGE_SCN_GPREL flag is repurposed to indicate that section
@@ -446,14 +493,59 @@ static void maybeReportRelocationToDiscarded(const SectionChunk *fromChunk,
 void SectionChunk::writeTo(uint8_t *buf) const {
   if (!hasData)
     return;
-  // Copy section contents from source object file to output file.
   ArrayRef<uint8_t> a = getContents();
-  if (!a.empty())
-    memcpy(buf, a.data(), a.size());
+  ArrayRef<X64JumpRelaxation> relaxations = getX64JumpRelaxations();
+  if (relaxations.empty()) {
+    if (!a.empty())
+      memcpy(buf, a.data(), a.size());
+  } else {
+    uint32_t inputOffset = 0;
+    uint32_t outputOffset = 0;
+    for (const X64JumpRelaxation &r : relaxations) {
+      assert((r.outputSize == 0 || r.outputSize == 2) &&
+             "invalid jump relaxation size");
+      uint32_t copySize = r.offset - inputOffset;
+      memcpy(buf + outputOffset, a.data() + inputOffset, copySize);
+      inputOffset += copySize + 5;
+      outputOffset += copySize + r.outputSize;
+    }
+    memcpy(buf + outputOffset, a.data() + inputOffset,
+           a.size() - inputOffset);
+
+    for (const X64JumpRelaxation &r : relaxations) {
+      const coff_relocation &rel = getRelocs()[r.relocIndex];
+      auto *sym = dyn_cast_or_null<Defined>(
+          file->getSymbol(rel.SymbolTableIndex));
+      if (!sym) {
+        maybeReportRelocationToDiscarded(this, sym, rel,
+                                         file->symtab.ctx.config.mingw);
+        continue;
+      }
+
+      int64_t addend = int32_t(read32le(a.data() + rel.VirtualAddress));
+      uint32_t jumpOffset = getOutputOffset(r.offset);
+      uint64_t target = sym->getRVA() + addend;
+      uint64_t next = rva + jumpOffset + r.outputSize;
+      if (r.outputSize == 0) {
+        if (target != next)
+          error("invalid relaxed jump layout in " + toString(file));
+        continue;
+      }
+
+      int64_t displacement = int64_t(target) - int64_t(next);
+      if (!isInt<8>(displacement)) {
+        error("relaxed jump out of range in " + toString(file));
+        continue;
+      }
+      buf[jumpOffset] = 0xeb;
+      buf[jumpOffset + 1] = uint8_t(displacement);
+    }
+  }
 
   // Apply relocations.
-  size_t inputSize = getSize();
-  for (const coff_relocation &rel : getRelocs()) {
+  size_t inputSize = header->SizeOfRawData;
+  for (auto [relocIndex, rel] : llvm::enumerate(getRelocs())) {
+    uint32_t currentRelocIndex = relocIndex;
     // Check for an invalid relocation offset. This check isn't perfect, because
     // we don't have the relocation size, which is only known after checking the
     // machine and relocation type. As a result, a relocation may overwrite the
@@ -463,7 +555,11 @@ void SectionChunk::writeTo(uint8_t *buf) const {
       continue;
     }
 
-    applyRelocation(buf + rel.VirtualAddress, rel);
+    if (llvm::any_of(relaxations, [&](const X64JumpRelaxation &r) {
+          return r.relocIndex == currentRelocIndex;
+        }))
+      continue;
+    applyRelocation(buf + getOutputOffset(rel.VirtualAddress), rel);
   }
 }
 
@@ -491,7 +587,7 @@ void SectionChunk::applyRelocation(uint8_t *off,
   uint64_t s = sym->getRVA();
 
   // Compute the RVA of the relocation for relative relocations.
-  uint64_t p = rva + rel.VirtualAddress;
+  uint64_t p = rva + getOutputOffset(rel.VirtualAddress);
   uint64_t imageBase = ctx.config.imageBase;
   switch (getArch()) {
   case Triple::x86_64:
@@ -614,7 +710,7 @@ void SectionChunk::getBaserels(std::vector<Baserel> *res) {
     Symbol *target = file->getSymbol(rel.SymbolTableIndex);
     if (!isa_and_nonnull<Defined>(target) || isa<DefinedAbsolute>(target))
       continue;
-    res->emplace_back(rva + rel.VirtualAddress, ty);
+    res->emplace_back(rva + getOutputOffset(rel.VirtualAddress), ty);
   }
 
   // Insert a 64-bit relocation for CHPEMetadataPointer in the native load
@@ -748,7 +844,8 @@ void SectionChunk::getRuntimePseudoRelocs(
     }
     // sizeInBits is used to initialize the Flags field; currently no
     // other flags are defined.
-    res.emplace_back(target, this, rel.VirtualAddress, sizeInBits);
+    res.emplace_back(target, this, getOutputOffset(rel.VirtualAddress),
+                     sizeInBits);
   }
 }
 
