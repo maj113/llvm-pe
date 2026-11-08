@@ -70,6 +70,11 @@ using namespace llvm;
 
 #define DEBUG_TYPE "x86-isel"
 
+static cl::opt<unsigned> FunctionAlignmentOpt(
+    "x86-function-alignment", cl::init(16), cl::Hidden,
+    cl::desc("Preferred alignment in bytes of functions not optimised for "
+             "size (llvm-pe)"));
+
 X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
                                      const X86Subtarget &STI)
     : TargetLowering(TM, STI), Subtarget(STI) {
@@ -2916,7 +2921,7 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
   // but a conditional move could be stalled by an expensive earlier operation.
   PredictableSelectIsExpensive = Subtarget.getSchedModel().isOutOfOrder();
   EnableExtLdPromotion = true;
-  setPrefFunctionAlignment(Align(16));
+  setPrefFunctionAlignment(Align(FunctionAlignmentOpt));
 
   verifyIntrinsicTables();
 
