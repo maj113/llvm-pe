@@ -1,9 +1,17 @@
-# Builds the x86-64 Windows toolchain MaiCord uses (clang-cl, lld-link and
-# llvm-lib with clang's core, x86 and Windows resource headers) from this fork
-# with clang-cl from an earlier release of it: ThinLTO, rpmalloc, /GS-, static
-# MSVC runtime. A toolchain-* tag push publishes it as a GitHub release; a
-# manual run uploads it as a workflow artifact instead.
-name: Windows toolchain release
+# Builds the x86-64 toolchains MaiCord uses from this fork, each with clang from
+# an earlier release of it (for Linux, the runner's clang until a release has a
+# Linux toolchain; see BOOTSTRAP_LINUX_SHA256): ThinLTO, no stack protector, and
+# the code generation MaiCord uses for itself (each job's LLVM_OPTIONS and
+# LINK_OPTIONS, without unwind tables). A bootstrap that does not know those
+# options first builds a stage 1 of this fork without them.
+#   windows  clang-cl, lld-link and llvm-lib with clang's core, x86 and Windows
+#            resource headers: rpmalloc, /GS-, static MSVC runtime.
+#   linux    clang (and clang++), ld.lld, llvm-ar (and llvm-ranlib) with clang's
+#            core, x86 and utility resource headers: -fno-stack-protector.
+# A toolchain-* tag push publishes both archives and their SHA-256 files as one
+# GitHub release (the publish job, the only one that can write); a manual run
+# only uploads them as workflow artifacts.
+name: Toolchain release
 
 on:
   push:
@@ -15,21 +23,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-toolchain-release-${{ github.ref_name }}
+  group: toolchain-release-${{ github.ref_name }}
   cancel-in-progress: false
 
+env:
+  # The host compilers: this release of the fork, not the runner's LLVM. A new release moves BOOTSTRAP_TAG to its
+  # predecessor and both SHA-256 pins to that release's assets.
+  BOOTSTRAP_TAG: toolchain-2026.10.28.2
+  BOOTSTRAP_SHA256: 5c88e1e44764e3ff5a38d0bbff5538a5ac60896ec1476baf591e57c008e9ecd9
+  # Empty while BOOTSTRAP_TAG has no llvm-pe-x86_64-linux.tar.xz (it predates the Linux toolchain): the Linux job then
+  # builds with the runner's own clang, once. The release after the first one with a Linux asset sets this to that
+  # asset's SHA-256.
+  BOOTSTRAP_LINUX_SHA256: ''
+
 jobs:
-  build:
+  windows:
+    name: Windows x86-64
     if: github.repository == 'maj113/llvm-pe'
     runs-on: windows-2022
     timeout-minutes: 360
-    permissions:
-      contents: write # gh release create
     env:
       ASSET: llvm-pe-x86_64-windows.zip
-      # The host compiler: this release of the fork, not the runner's LLVM.
-      BOOTSTRAP_TAG: toolchain-2026.10.28.2
-      BOOTSTRAP_SHA256: 5c88e1e44764e3ff5a38d0bbff5538a5ac60896ec1476baf591e57c008e9ecd9
+      # The release's own code generation, as MaiCord builds its own (cmake/build_contract.cmake): IPRA on register
+      # masks, 1-byte function alignment and the internal call contract in every ThinLTO backend, which also needs the
+      # unwind tables off (LLVM_PE_NO_UNWIND_TABLES), and lld-link's branch relaxation.
+      LLVM_OPTIONS: -mllvm -enable-ipra -mllvm -x86-ipra-nocsr=false -mllvm -x86-function-alignment=1 -mllvm -x86-internal-cc
+      LINK_OPTIONS: /mllvm:-enable-ipra /mllvm:-x86-ipra-nocsr=false /mllvm:-x86-function-alignment=1 /mllvm:-x86-internal-cc /OPT:LLDBRANCHRELAX
     steps:
       - name: Validate tag
         if: github.event_name == 'push'
@@ -102,12 +121,75 @@ jobs:
           path: ${{ runner.temp }}/bootstrap
           key: llvm-pe-bootstrap-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_SHA256 }}
 
-      - name: Configure
+      # The release options are this fork's own, and a bootstrap that predates them (toolchain-2026.10.28.2) rejects
+      # them: then the bootstrap builds a first stage without them, and that stage builds the release. Once
+      # BOOTSTRAP_TAG names a release built with them, this probe passes and the release builds in one stage.
+      - name: Check whether the bootstrap knows the release options
+        id: probe
         shell: pwsh
         run: |
           $bin = Join-Path $env:RUNNER_TEMP 'bootstrap\bin'
+          $probe = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'probe')
+          Set-Content -LiteralPath "$probe\probe.c" -Value 'int main(void) { return 0; }'
+          & (Join-Path $bin 'clang-cl.exe') /nologo /c @($env:LLVM_OPTIONS -split ' ') "$probe\probe.c" "/Fo$probe\probe.obj" 2>&1 | Out-Host
+          $known = $LASTEXITCODE -eq 0
+          if ($known) {
+            & (Join-Path $bin 'lld-link.exe') /nologo /subsystem:console /entry:main @($env:LINK_OPTIONS -split ' ') `
+              "/out:$probe\probe.exe" "$probe\probe.obj" 2>&1 | Out-Host
+            $known = $LASTEXITCODE -eq 0
+          }
+          "stage1=$(if ($known) { 'false' } else { 'true' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "The bootstrap $(if ($known) { 'accepts' } else { 'rejects' }) the release options."
+          # A rejected option is an answer, not a failure (pwsh would exit with the last native exit code).
+          exit 0
+
+      - name: Build stage 1
+        if: steps.probe.outputs.stage1 == 'true'
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'bootstrap\bin'
+          $options = @(
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
+            "-DCMAKE_C_COMPILER=$(Join-Path $bin 'clang-cl.exe')",
+            "-DCMAKE_CXX_COMPILER=$(Join-Path $bin 'clang-cl.exe')",
+            "-DCMAKE_LINKER=$(Join-Path $bin 'lld-link.exe')",
+            "-DCMAKE_AR=$(Join-Path $bin 'llvm-lib.exe')",
+            "-DCMAKE_MT=$((Get-Command mt.exe).Source)",
+            '-DLLVM_ENABLE_PROJECTS=clang;lld',
+            '-DLLVM_TARGETS_TO_BUILD=X86',
+            '-DLLVM_ENABLE_ASSERTIONS=OFF',
+            '-DLLVM_INCLUDE_TESTS=OFF',
+            '-DLLVM_INCLUDE_BENCHMARKS=OFF',
+            '-DLLVM_INCLUDE_EXAMPLES=OFF',
+            '-DLLVM_INCLUDE_DOCS=OFF',
+            '-DCLANG_INCLUDE_TESTS=OFF',
+            '-DCLANG_INCLUDE_DOCS=OFF',
+            '-DCLANG_ENABLE_CIR=OFF',
+            '-DCLANG_ENABLE_STATIC_ANALYZER=OFF',
+            '-DCLANG_ENABLE_OBJC_REWRITER=OFF',
+            '-DLLD_ENABLE_ELF=OFF',
+            '-DLLD_ENABLE_MACHO=OFF',
+            '-DLLD_ENABLE_MINGW=OFF',
+            '-DLLD_ENABLE_WASM=OFF',
+            '-DLLVM_ENABLE_DIA_SDK=OFF',
+            '-DLLVM_ENABLE_LIBXML2=OFF',
+            '-DLLVM_ENABLE_ZLIB=OFF',
+            '-DLLVM_ENABLE_ZSTD=OFF')
+          cmake -G Ninja -S llvm -B build-stage1 @options
+          if ($LASTEXITCODE -ne 0) { throw "Stage 1 cmake failed with exit code $LASTEXITCODE." }
+          # clang-cl and lld-link come with clang and lld; llvm-lib reads the release's bitcode archives.
+          ninja -C build-stage1 clang lld llvm-lib
+          if ($LASTEXITCODE -ne 0) { throw "Stage 1 ninja failed with exit code $LASTEXITCODE." }
+
+      - name: Configure
+        shell: pwsh
+        env:
+          STAGE1: ${{ steps.probe.outputs.stage1 }}
+        run: |
+          $bin = if ($env:STAGE1 -eq 'true') { Join-Path $env:GITHUB_WORKSPACE 'build-stage1\bin' } else { Join-Path $env:RUNNER_TEMP 'bootstrap\bin' }
           & (Join-Path $bin 'clang-cl.exe') --version
-          if ($LASTEXITCODE -ne 0) { throw 'The bootstrap clang-cl does not run.' }
+          if ($LASTEXITCODE -ne 0) { throw 'The host clang-cl does not run.' }
           $options = @(
             '-DCMAKE_BUILD_TYPE=Release',
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
@@ -140,12 +222,16 @@ jobs:
             '-DLLVM_ENABLE_DIA_SDK=OFF',
             '-DLLVM_ENABLE_LIBXML2=OFF',
             '-DLLVM_ENABLE_ZLIB=OFF',
-            '-DLLVM_ENABLE_ZSTD=OFF')
+            '-DLLVM_ENABLE_ZSTD=OFF',
+            '-DLLVM_PE_NO_UNWIND_TABLES=ON',
+            "-DCMAKE_EXE_LINKER_FLAGS=$env:LINK_OPTIONS",
+            # CMake's compiler checks would link with /debug, which /OPT:LLDBRANCHRELAX rejects.
+            '-DCMAKE_TRY_COMPILE_CONFIGURATION=Release')
           # No stack buffer security cookies: CMake prepends CFLAGS/CXXFLAGS to the flags every
           # compile uses, and stack protection is a per-function attribute in the bitcode, so the
-          # ThinLTO links follow it too.
-          $env:CFLAGS = '/GS-'
-          $env:CXXFLAGS = '/GS-'
+          # ThinLTO links follow it too. The release options go to every compile as well.
+          $env:CFLAGS = "/GS- $env:LLVM_OPTIONS"
+          $env:CXXFLAGS = "/GS- $env:LLVM_OPTIONS"
           cmake -G Ninja -S llvm -B build @options
           if ($LASTEXITCODE -ne 0) { throw "cmake failed with exit code $LASTEXITCODE." }
 
@@ -214,27 +300,337 @@ jobs:
           [IO.File]::WriteAllText("$zip.sha256", $hash)
           Write-Host "$env:ASSET SHA-256: $hash"
 
+      # The publish job attaches it to a tag's release; a manual run keeps it as this run's artifact.
       - name: Upload the toolchain
-        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: llvm-pe-x86_64-windows
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+          if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
-      - name: Publish release
+  # Only what MaiCord's Linux build runs (tools/build_linux.sh, cmake/build_contract_linux.cmake,
+  # tools/generate_libc_stubs.py and the ABI checks of its CI): clang and clang++ compile (full LTO, -nostdinc) and
+  # drive every link; ld.lld links (-fuse-ld=lld) and runs the LTO code generation; llvm-ar archives the bitcode objects
+  # and llvm-ranlib indexes them; the ABI checks compile the system's library headers, which include clang's core
+  # resource headers (stddef.h, stdarg.h, stdint.h, limits.h). MaiCord links with -nostdlib: no compiler-rt. The x86
+  # and utility resource headers are for the next release, which this toolchain builds: LLVM includes <cpuid.h> and
+  # <immintrin.h> (which includes <mm_malloc.h>).
+  linux:
+    name: Linux x86-64
+    if: github.repository == 'maj113/llvm-pe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASSET: llvm-pe-x86_64-linux.tar.xz
+      # The release's own code generation, as on Windows: IPRA on register masks and 1-byte function alignment in every
+      # ThinLTO backend, and no unwind tables (LLVM_PE_NO_UNWIND_TABLES). The internal call contract is for Win64
+      # only, and branch relaxation exists only in lld's COFF writer, so ld.lld has no counterpart. -fuse-ld=lld is in
+      # the link options because CMake's compiler checks link before LLVM_ENABLE_LLD applies, and only lld takes -mllvm.
+      LLVM_OPTIONS: -mllvm -enable-ipra -mllvm -x86-ipra-nocsr=false -mllvm -x86-function-alignment=1
+      LINK_OPTIONS: -fuse-ld=lld -Wl,-mllvm,-enable-ipra -Wl,-mllvm,-x86-ipra-nocsr=false -Wl,-mllvm,-x86-function-alignment=1
+    steps:
+      - name: Validate tag
         if: github.event_name == 'push'
-        shell: pwsh
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^toolchain-[0-9A-Za-z._-]+$ ]]; then
+            echo "Release tag '$GITHUB_REF_NAME' must look like toolchain-YYYY.MM.DD." >&2
+            exit 1
+          fi
+
+      # The extracted bootstrap toolchain is cached under its tag and SHA-256, so a new pin
+      # misses and fetches its own.
+      - name: Restore the bootstrap toolchain
+        id: bootstrap
+        if: env.BOOTSTRAP_LINUX_SHA256 != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bootstrap
+          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
+
+      - name: Fetch the bootstrap toolchain
+        if: env.BOOTSTRAP_LINUX_SHA256 != '' && steps.bootstrap.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Windows x86-64 clang-cl/lld-link/llvm-lib toolchain built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA (X86 target, Release, static MSVC runtime, rpmalloc allocator, /GS-, ThinLTO) by clang-cl from $env:BOOTSTRAP_TAG."
-          gh release create $env:GITHUB_REF_NAME $env:ASSET "$env:ASSET.sha256" `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title $env:GITHUB_REF_NAME `
-            --notes $notes
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE." }
+          download="$RUNNER_TEMP/bootstrap-download"
+          gh release download "$BOOTSTRAP_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --dir "$download"
+          echo "$BOOTSTRAP_LINUX_SHA256  $download/$ASSET" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bootstrap"
+          tar -xJf "$download/$ASSET" -C "$RUNNER_TEMP/bootstrap"
+
+      - name: Cache the bootstrap toolchain
+        if: env.BOOTSTRAP_LINUX_SHA256 != '' && steps.bootstrap.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bootstrap
+          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
+
+      # ninja, and for the first Linux toolchain only (BOOTSTRAP_LINUX_SHA256 empty, as no earlier release has one) the
+      # runner's distribution clang, lld and llvm-ar as the bootstrap toolchain.
+      - name: Install the host tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          packages=(ninja-build)
+          if [ -z "$BOOTSTRAP_LINUX_SHA256" ]; then packages+=(clang lld llvm); fi
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 "${packages[@]}"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            cmake
+            clang
+            compiler-rt
+            libc
+            lld
+            llvm
+            third-party
+
+      # As on Windows: a bootstrap that rejects the release options (the runner's clang, or a release from before
+      # them) builds a first stage without them, and that stage builds the release.
+      - name: Check whether the bootstrap knows the release options
+        id: probe
+        run: |
+          if [ -n "$BOOTSTRAP_LINUX_SHA256" ]; then bin="$RUNNER_TEMP/bootstrap/bin"; else bin=/usr/bin; fi
+          read -ra llvm_options <<< "$LLVM_OPTIONS"
+          read -ra link_options <<< "$LINK_OPTIONS"
+          probe="$RUNNER_TEMP/probe"
+          mkdir -p "$probe"
+          echo 'int main(void) { return 0; }' > "$probe/probe.c"
+          if "$bin/clang" "${llvm_options[@]}" "${link_options[@]}" -o "$probe/probe" "$probe/probe.c"; then
+            echo "stage1=false" >> "$GITHUB_OUTPUT"
+            echo "The bootstrap accepts the release options."
+          else
+            echo "stage1=true" >> "$GITHUB_OUTPUT"
+            echo "The bootstrap rejects the release options."
+          fi
+
+      - name: Build stage 1
+        if: steps.probe.outputs.stage1 == 'true'
+        run: |
+          if [ -n "$BOOTSTRAP_LINUX_SHA256" ]; then bin="$RUNNER_TEMP/bootstrap/bin"; else bin=/usr/bin; fi
+          options=(
+            -DCMAKE_BUILD_TYPE=Release
+            "-DCMAKE_C_COMPILER=$bin/clang"
+            "-DCMAKE_CXX_COMPILER=$bin/clang++"
+            "-DCMAKE_AR=$bin/llvm-ar"
+            "-DCMAKE_RANLIB=$bin/llvm-ranlib"
+            -DLLVM_ENABLE_LLD=ON
+            '-DLLVM_ENABLE_PROJECTS=clang;lld'
+            -DLLVM_TARGETS_TO_BUILD=X86
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+            -DLLVM_ENABLE_PLUGINS=OFF
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_DOCS=OFF
+            -DCLANG_INCLUDE_TESTS=OFF
+            -DCLANG_INCLUDE_DOCS=OFF
+            -DCLANG_ENABLE_CIR=OFF
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF
+            -DCLANG_ENABLE_OBJC_REWRITER=OFF
+            -DLLD_ENABLE_COFF=OFF
+            -DLLD_ENABLE_MACHO=OFF
+            -DLLD_ENABLE_MINGW=OFF
+            -DLLD_ENABLE_WASM=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_ZLIB=OFF
+            -DLLVM_ENABLE_ZSTD=OFF
+            -DLLVM_ENABLE_LIBEDIT=OFF
+            -DLLVM_ENABLE_LIBPFM=OFF
+          )
+          cmake -G Ninja -S llvm -B build-stage1 "${options[@]}"
+          # clang++ and ld.lld come with clang and lld; llvm-ar and llvm-ranlib archive the release's bitcode.
+          ninja -C build-stage1 clang lld llvm-ar llvm-ranlib
+
+      - name: Configure
+        env:
+          STAGE1: ${{ steps.probe.outputs.stage1 }}
+        run: |
+          if [ "$STAGE1" = true ]; then
+            bin="$GITHUB_WORKSPACE/build-stage1/bin"
+          elif [ -n "$BOOTSTRAP_LINUX_SHA256" ]; then
+            bin="$RUNNER_TEMP/bootstrap/bin"
+          else
+            bin=/usr/bin
+          fi
+          "$bin/clang" --version
+          cmake --version
+          options=(
+            -DCMAKE_BUILD_TYPE=Release
+            "-DCMAKE_INSTALL_PREFIX=$RUNNER_TEMP/llvm-pe"
+            "-DCMAKE_C_COMPILER=$bin/clang"
+            "-DCMAKE_CXX_COMPILER=$bin/clang++"
+            "-DCMAKE_AR=$bin/llvm-ar"
+            "-DCMAKE_RANLIB=$bin/llvm-ranlib"
+            -DLLVM_ENABLE_LLD=ON
+            -DLLVM_ENABLE_LTO=Thin
+            # Two concurrent LTO links of clang and lld need more memory than a runner has.
+            -DLLVM_PARALLEL_LINK_JOBS=2
+            # No symbol tables, which the Windows binaries do not carry either, and the release options in every
+            # ThinLTO backend.
+            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--strip-all $LINK_OPTIONS"
+            '-DLLVM_ENABLE_PROJECTS=clang;lld'
+            -DLLVM_TARGETS_TO_BUILD=X86
+            '-DLLVM_DISTRIBUTION_COMPONENTS=clang;lld;llvm-ar;llvm-ranlib;core-resource-headers;x86-resource-headers;utility-resource-headers'
+            # clang++ beside clang, but no clang-cl or clang-cpp.
+            -DCLANG_LINKS_TO_CREATE=clang++
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+            -DLLVM_ENABLE_PLUGINS=OFF
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_DOCS=OFF
+            -DCLANG_INCLUDE_TESTS=OFF
+            -DCLANG_INCLUDE_DOCS=OFF
+            -DCLANG_ENABLE_CIR=OFF
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF
+            -DCLANG_ENABLE_OBJC_REWRITER=OFF
+            # ld.lld alone.
+            -DLLD_ENABLE_COFF=OFF
+            -DLLD_ENABLE_MACHO=OFF
+            -DLLD_ENABLE_MINGW=OFF
+            -DLLD_ENABLE_WASM=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_ZLIB=OFF
+            -DLLVM_ENABLE_ZSTD=OFF
+            -DLLVM_ENABLE_LIBEDIT=OFF
+            -DLLVM_ENABLE_LIBPFM=OFF
+            -DLLVM_PE_NO_UNWIND_TABLES=ON
+          )
+          # No stack protector, as the Windows build's /GS-; ThinLTO carries it per function into the links. The release
+          # options go to every compile as well.
+          CFLAGS="-fno-stack-protector $LLVM_OPTIONS" CXXFLAGS="-fno-stack-protector $LLVM_OPTIONS" \
+            cmake -G Ninja -S llvm -B build "${options[@]}"
+
+      # Builds the distribution components and nothing else, and installs them into $RUNNER_TEMP/llvm-pe.
+      - name: Build
+        run: ninja -C build install-distribution
+
+      - name: Package
+        run: |
+          stage="$RUNNER_TEMP/llvm-pe"
+          bin="$stage/bin"
+          cp llvm/LICENSE.TXT "$stage/LICENSE.TXT"
+          for project in llvm clang lld; do
+            mkdir -p "$stage/licenses/$project"
+            cp "$project/LICENSE.TXT" "$stage/licenses/$project/"
+          done
+          ls -lA "$bin"
+          includes=("$stage"/lib/clang/*/include)
+          if [ "${#includes[@]}" != 1 ] || [ ! -f "${includes[0]}/stddef.h" ] || [ ! -f "${includes[0]}/cpuid.h" ]; then
+            echo "Expected one clang resource include directory with stddef.h and cpuid.h." >&2
+            exit 1
+          fi
+
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          "$bin/clang" --version
+          # A freestanding image linked as MaiCord links one: -nostdinc, LTO, an llvm-ar archive indexed by llvm-ranlib,
+          # and ld.lld with -nostdlib -pie and the image's own _start, which exits with 42.
+          cat > "$smoke/start.cpp" <<'EOF'
+          static long answer(long x) { return x * 6; }
+          extern "C" [[noreturn]] void _start() {
+            __asm__ volatile("syscall" : : "a"(231L), "D"(answer(7)) : "rcx", "r11", "memory");
+            __builtin_unreachable();
+          }
+          EOF
+          "$bin/clang++" -std=c++23 -nostdinc -O2 -flto -fPIE -fno-exceptions -fno-rtti -c "$smoke/start.cpp" -o "$smoke/start.o"
+          "$bin/llvm-ar" qc "$smoke/libstart.a" "$smoke/start.o"
+          "$bin/llvm-ranlib" "$smoke/libstart.a"
+          "$bin/clang++" -fuse-ld=lld -nostdlib -pie -flto -Wl,-e,_start -Wl,-z,now -Wl,--gc-sections \
+            -o "$smoke/start" "$smoke/libstart.a"
+          status=0
+          "$smoke/start" || status=$?
+          if [ "$status" != 42 ]; then
+            echo "The freestanding smoke image exited with $status, not 42." >&2
+            exit 1
+          fi
+          # A hosted program against the system's headers, as the ABI checks build theirs.
+          cat > "$smoke/hosted.c" <<'EOF'
+          #include <limits.h>
+          #include <stddef.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          struct pair { char c; int64_t i; };
+          int main(void) { printf("%d\n", (int)offsetof(struct pair, i) + CHAR_BIT); return 0; }
+          EOF
+          "$bin/clang" -O2 -o "$smoke/hosted" "$smoke/hosted.c"
+          result="$("$smoke/hosted")"
+          if [ "$result" != 16 ]; then
+            echo "The hosted smoke program printed '$result', not 16." >&2
+            exit 1
+          fi
+
+          archive="$GITHUB_WORKSPACE/$ASSET"
+          mapfile -t entries < <(ls -A "$stage")
+          tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner -cf - "${entries[@]}" | xz -9 -T0 > "$archive"
+          hash="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          printf '%s' "$hash" > "$archive.sha256"
+          echo "$ASSET SHA-256: $hash ($(stat -c %s "$archive") bytes)"
+
+      # The publish job attaches it to a tag's release; a manual run keeps it as this run's artifact.
+      - name: Upload the toolchain
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: llvm-pe-x86_64-linux
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  # A toolchain-* tag push of this repository publishes both toolchains as one release once both are built. A manual
+  # run, on any branch or tag, never gets here, and only this job may write to the repository.
+  publish:
+    name: Publish release
+    needs: [windows, linux]
+    if: >-
+      github.repository == 'maj113/llvm-pe' && github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/toolchain-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # gh release create
+    steps:
+      - name: Download the toolchains
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: llvm-pe-x86_64-*
+          merge-multiple: true
+          path: assets
+
+      - name: Publish release
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(llvm-pe-x86_64-windows.zip llvm-pe-x86_64-linux.tar.xz)
+          for asset in "${assets[@]}"; do
+            if [ "$(sha256sum "$asset" | cut -d ' ' -f 1)" != "$(cat "$asset.sha256")" ]; then
+              echo "$asset does not match its SHA-256 file." >&2
+              exit 1
+            fi
+          done
+          linux_host="clang from $BOOTSTRAP_TAG"
+          if [ -z "$BOOTSTRAP_LINUX_SHA256" ]; then linux_host="the runner's distribution clang"; fi
+          notes="x86-64 toolchains built from $GITHUB_REPOSITORY@$GITHUB_SHA (X86 target, Release, ThinLTO):
+          - llvm-pe-x86_64-windows.zip: clang-cl, lld-link and llvm-lib (static MSVC runtime, rpmalloc allocator, /GS-), built by clang-cl from $BOOTSTRAP_TAG.
+          - llvm-pe-x86_64-linux.tar.xz: clang, clang++, ld.lld, llvm-ar and llvm-ranlib (-fno-stack-protector), built by $linux_host."
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" "${assets[@]/%/.sha256}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "$notes"
