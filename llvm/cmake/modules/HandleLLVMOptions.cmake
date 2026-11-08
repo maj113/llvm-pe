@@ -1613,6 +1613,16 @@ if(LLVM_ENABLE_FATLTO AND ((UNIX AND NOT APPLE) OR FUCHSIA))
   endif()
 endif()
 
+if(LLVM_PE_NO_UNWIND_TABLES)
+  if(CLANG_CL)
+    append("/clang:-fno-asynchronous-unwind-tables /clang:-fno-unwind-tables" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  elseif(LLVM_COMPILER_IS_GCC_COMPATIBLE)
+    append("-fno-asynchronous-unwind-tables -fno-unwind-tables" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  else()
+    message(FATAL_ERROR "LLVM_PE_NO_UNWIND_TABLES needs clang, clang-cl or GCC.")
+  endif()
+endif()
+
 # Set an AIX default for LLVM_EXPORT_SYMBOLS_FOR_PLUGINS based on whether we are
 # doing dynamic linking (see below).
 set(LLVM_EXPORT_SYMBOLS_FOR_PLUGINS_AIX_default OFF)

@@ -274,6 +274,10 @@ if config.clang_staticanalyzer:
 if config.clang_enable_cir:
     config.available_features.add("cir-support")
 
+# llvm-pe: LLVM built without unwind tables (LLVM_PE_NO_UNWIND_TABLES).
+if config.llvm_pe_no_unwind_tables:
+    config.available_features.add("llvm-pe-no-unwind-tables")
+
 # SPIRV-Tools validator availability (e.g. built with -DLLVM_INCLUDE_SPIRV_TOOLS_TESTS)
 if lit.util.which("spirv-val", config.llvm_tools_dir):
     config.available_features.add("spirv-val")

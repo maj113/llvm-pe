@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Config/config.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ExitCodes.h"
@@ -17,6 +18,19 @@
 #include <setjmp.h>
 #ifdef __APPLE__
 #include <sys/resource.h>
+#endif
+
+// llvm-pe: without unwind tables (LLVM_PE_NO_UNWIND_TABLES), SEH cannot unwind
+// through LLVM's frames, so the exception HandleExit raises would never reach
+// RunSafely's __except and the process would die with it. RunSafely sets a
+// __builtin_setjmp buffer instead, which needs no unwind information, and
+// HandleExit jumps back to it; that covers every exit through a recovery
+// context (fatal errors in an in-process cc1, lld's fatal() under
+// safeLldMain). Crashes cannot be recovered from in such a build.
+#if defined(_MSC_VER) && LLVM_PE_NO_UNWIND_TABLES
+#define LLVM_PE_EXIT_BY_JUMP 1
+#else
+#define LLVM_PE_EXIT_BY_JUMP 0
 #endif
 
 using namespace llvm;
@@ -35,6 +49,9 @@ struct CrashRecoveryContextImpl {
 
   CrashRecoveryContext *CRC;
   ::jmp_buf JumpBuffer;
+#if LLVM_PE_EXIT_BY_JUMP
+  void *ExitBuffer[5];
+#endif
   volatile unsigned Failed : 1;
   unsigned SwitchedThread : 1;
   unsigned ValidJumpBuffer : 1;
@@ -76,8 +93,13 @@ public:
     CRC->RetCode = RetCode;
 
     // Jump back to the RunSafely we were called under.
-    if (ValidJumpBuffer)
+    if (ValidJumpBuffer) {
+#if LLVM_PE_EXIT_BY_JUMP
+      __builtin_longjmp(ExitBuffer, 1);
+#else
       longjmp(JumpBuffer, 1);
+#endif
+    }
 
     // Otherwise let the caller decide of the outcome of the crash. Currently
     // this occurs when using SEH on Windows with MSVC or clang-cl.
@@ -201,6 +223,22 @@ static void
 installExceptionOrSignalHandlers(bool NeedsPOSIXUtilitySignalHandling) {}
 static void uninstallExceptionOrSignalHandlers() {}
 
+#if LLVM_PE_EXIT_BY_JUMP
+bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
+  if (!gCrashRecoveryEnabled) {
+    Fn();
+    return true;
+  }
+  assert(!Impl && "Crash recovery context already initialized!");
+  CrashRecoveryContextImpl *CRCI = new CrashRecoveryContextImpl(this);
+  Impl = CRCI;
+  CRCI->ValidJumpBuffer = true;
+  if (__builtin_setjmp(CRCI->ExitBuffer) != 0)
+    return false;
+  Fn();
+  return true;
+}
+#else
 // We need this function because the call to GetExceptionInformation() can only
 // occur inside the __except evaluation block
 static int ExceptionFilter(_EXCEPTION_POINTERS *Except) {
@@ -243,6 +281,7 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
   }
   return true;
 }
+#endif
 
 #else // !_MSC_VER
 
@@ -448,7 +487,18 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
 #endif // !_MSC_VER
 
 [[noreturn]] void CrashRecoveryContext::HandleExit(int RetCode) {
-#if defined(_WIN32)
+#if LLVM_PE_EXIT_BY_JUMP
+  // Hand the exit to the recovery context as the exception filter would, with
+  // the exception record it would have seen, and jump back to RunSafely.
+  EXCEPTION_RECORD Record = {};
+  Record.ExceptionCode = 0xE0000000 | RetCode;
+  CONTEXT Context;
+  ::RtlCaptureContext(&Context);
+  EXCEPTION_POINTERS Pointers = {&Record, &Context};
+  CrashRecoveryContextImpl *CRCI = (CrashRecoveryContextImpl *)Impl;
+  assert(CRCI && "Crash recovery context never initialized!");
+  CRCI->HandleCrash(RetCode, reinterpret_cast<uintptr_t>(&Pointers));
+#elif defined(_WIN32)
   // Since the exception code is actually of NTSTATUS type, we use the
   // Microsoft-recommended 0xE prefix, to signify that this is a user error.
   // This value is a combination of the customer field (bit 29) and severity

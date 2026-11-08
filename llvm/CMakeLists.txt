@@ -755,6 +755,9 @@ option(LLVM_STATIC_LINK_CXX_STDLIB "Statically link the standard library." OFF)
 option(LLVM_ENABLE_LLD "Use lld as C and C++ linker." OFF)
 option(LLVM_ENABLE_PEDANTIC "Compile with pedantic enabled." ON)
 option(LLVM_ENABLE_WERROR "Fail and stop if a warning is triggered." OFF)
+# llvm-pe: build every object without unwind tables. Sets LLVM_PE_NO_UNWIND_TABLES in config.h, which lets
+# CrashRecoveryContext leave a recovery context without unwinding through LLVM's frames.
+option(LLVM_PE_NO_UNWIND_TABLES "Build without unwind tables (llvm-pe)." OFF)
 
 option(LLVM_ENABLE_DUMP "Enable dump functions even when assertions are disabled" OFF)
 option(LLVM_UNREACHABLE_OPTIMIZE "Optimize llvm_unreachable() as undefined behavior (default), guaranteed trap when OFF" ON)

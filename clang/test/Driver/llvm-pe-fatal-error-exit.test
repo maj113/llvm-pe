@@ -1,0 +1,19 @@
+; REQUIRES: llvm-pe-no-unwind-tables, x86-registered-target
+
+; llvm-pe: in a build without unwind tables, a fatal error in an in-process
+; cc1 still leaves through its CrashRecoveryContext back to the driver, which
+; reports the frontend's exit code 70 as a build with unwind tables does.
+
+; RUN: not %clang --target=x86_64-pc-windows-msvc -fintegrated-cc1 \
+; RUN:   -fno-crash-diagnostics -c -x ir %s -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: fatal error: error in backend: Cannot select
+; CHECK: error: clang frontend command failed with exit code 70
+
+define i16 @f() {
+  %r = call { i16, i32 } @llvm.x86.rdrand.16()
+  %v = extractvalue { i16, i32 } %r, 0
+  ret i16 %v
+}
+
+declare { i16, i32 } @llvm.x86.rdrand.16()

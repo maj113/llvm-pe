@@ -23,6 +23,10 @@
    backslashes. */
 #cmakedefine01 LLVM_WINDOWS_PREFER_FORWARD_SLASH
 
+/* llvm-pe: define to 1 if LLVM is built without unwind tables, and to 0
+   otherwise. */
+#cmakedefine01 LLVM_PE_NO_UNWIND_TABLES
+
 /* Define to 1 if you have the `backtrace' function. */
 #cmakedefine HAVE_BACKTRACE ${HAVE_BACKTRACE}
 

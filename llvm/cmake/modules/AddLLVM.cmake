@@ -36,7 +36,9 @@ set(LLVM_CXXFLAGS_EH_DISABLE "")
 set(LLVM_CXXFLAGS_EH_ENABLE "")
 if(LLVM_COMPILER_IS_GCC_COMPATIBLE)
   set(LLVM_CXXFLAGS_EH_DISABLE "-fno-exceptions")
-  if(LLVM_ENABLE_UNWIND_TABLES)
+  # llvm-pe: LLVM_PE_NO_UNWIND_TABLES overrides LLVM_ENABLE_UNWIND_TABLES, whose -funwind-tables would come after
+  # the -fno-unwind-tables in CMAKE_CXX_FLAGS and win.
+  if(LLVM_ENABLE_UNWIND_TABLES AND NOT LLVM_PE_NO_UNWIND_TABLES)
     list(APPEND LLVM_CXXFLAGS_EH_DISABLE "-funwind-tables")
   else()
     list(APPEND LLVM_CXXFLAGS_EH_DISABLE "-fno-unwind-tables")
