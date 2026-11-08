@@ -27,14 +27,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The host compilers: this release of the fork, not the runner's LLVM. A new release moves BOOTSTRAP_TAG to its
-  # predecessor and both SHA-256 pins to that release's assets.
+  # The host compilers: releases of the fork, not the runner's LLVM. A new release normally moves both tags to its
+  # predecessor and the SHA-256 pins to that release's assets. Windows stays on toolchain-2026.10.28.2 for now: the
+  # clang-cl of toolchain-2026.11.08 ends in an access violation on a fatal error, which CMake's checks provoke.
   BOOTSTRAP_TAG: toolchain-2026.10.28.2
   BOOTSTRAP_SHA256: 5c88e1e44764e3ff5a38d0bbff5538a5ac60896ec1476baf591e57c008e9ecd9
-  # Empty while BOOTSTRAP_TAG has no llvm-pe-x86_64-linux.tar.xz (it predates the Linux toolchain): the Linux job then
-  # builds with the runner's own clang, once. The release after the first one with a Linux asset sets this to that
-  # asset's SHA-256.
-  BOOTSTRAP_LINUX_SHA256: ''
+  # BOOTSTRAP_LINUX_SHA256 is empty only for a tag without llvm-pe-x86_64-linux.tar.xz (one from before
+  # toolchain-2026.11.08): the Linux job then builds with the runner's own clang.
+  BOOTSTRAP_LINUX_TAG: toolchain-2026.11.08
+  BOOTSTRAP_LINUX_SHA256: e1f1d42492e9c5657fbfbec42b1aec819a414232e2ff2653a349a76c7c1dc257
 
 jobs:
   windows:
@@ -352,7 +353,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bootstrap
-          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
+          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_LINUX_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
 
       - name: Fetch the bootstrap toolchain
         if: env.BOOTSTRAP_LINUX_SHA256 != '' && steps.bootstrap.outputs.cache-hit != 'true'
@@ -360,7 +361,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           download="$RUNNER_TEMP/bootstrap-download"
-          gh release download "$BOOTSTRAP_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --dir "$download"
+          gh release download "$BOOTSTRAP_LINUX_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --dir "$download"
           echo "$BOOTSTRAP_LINUX_SHA256  $download/$ASSET" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/bootstrap"
           tar -xJf "$download/$ASSET" -C "$RUNNER_TEMP/bootstrap"
@@ -370,10 +371,10 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bootstrap
-          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
+          key: llvm-pe-bootstrap-linux-${{ env.BOOTSTRAP_LINUX_TAG }}-${{ env.BOOTSTRAP_LINUX_SHA256 }}
 
-      # ninja, and for the first Linux toolchain only (BOOTSTRAP_LINUX_SHA256 empty, as no earlier release has one) the
-      # runner's distribution clang, lld and llvm-ar as the bootstrap toolchain.
+      # ninja, and for a bootstrap tag without a Linux toolchain (BOOTSTRAP_LINUX_SHA256 empty) the runner's
+      # distribution clang, lld and llvm-ar as the bootstrap toolchain.
       - name: Install the host tools
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -624,7 +625,7 @@ jobs:
               exit 1
             fi
           done
-          linux_host="clang from $BOOTSTRAP_TAG"
+          linux_host="clang from $BOOTSTRAP_LINUX_TAG"
           if [ -z "$BOOTSTRAP_LINUX_SHA256" ]; then linux_host="the runner's distribution clang"; fi
           notes="x86-64 toolchains built from $GITHUB_REPOSITORY@$GITHUB_SHA (X86 target, Release, ThinLTO):
           - llvm-pe-x86_64-windows.zip: clang-cl, lld-link and llvm-lib (static MSVC runtime, rpmalloc allocator, /GS-), built by clang-cl from $BOOTSTRAP_TAG.
