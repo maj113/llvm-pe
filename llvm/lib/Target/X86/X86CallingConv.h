@@ -27,6 +27,30 @@ bool RetCC_X86(unsigned ValNo, MVT ValVT, MVT LocVT,
 bool CC_X86(unsigned ValNo, MVT ValVT, MVT LocVT, CCValAssign::LocInfo LocInfo,
             ISD::ArgFlagsTy ArgFlags, Type *OrigTy, CCState &State);
 
+namespace X86 {
+
+/// llvm-pe: the calling convention X86InternalCallContract gives functions
+/// that are only ever called directly from their own module on x86-64
+/// Windows. Fork-private, far above upstream's range.
+constexpr CallingConv::ID InternalCC = 1000;
+
+/// The callee-saved set of InternalCC (-x86-internal-cc-csr).
+enum class InternalCSR {
+  /// RBX, RBP, RDI, RSI, R12-R15, XMM6-15 (Win64): six argument registers of
+  /// each kind.
+  Win64,
+  /// RBX, RBP, R12-R15 (SysV): eight of each.
+  SysV,
+  /// RBX, RBP, R12-R15, XMM8-15: eight of each.
+  SysVXMM,
+};
+InternalCSR getInternalCCCSR();
+inline bool internalCCPreservesWin64Set() {
+  return getInternalCCCSR() == InternalCSR::Win64;
+}
+
+} // namespace X86
+
 } // End llvm namespace
 
 #endif

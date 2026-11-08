@@ -1303,6 +1303,8 @@ static bool mayTailCallThisCC(CallingConv::ID CC) {
   case CallingConv::X86_StdCall:
   case CallingConv::X86_VectorCall:
   case CallingConv::X86_FastCall:
+  // llvm-pe internal call contract:
+  case X86::InternalCC:
   // Swift:
   case CallingConv::Swift:
     return true;
@@ -3006,11 +3008,13 @@ bool X86TargetLowering::isEligibleForSiblingCallOpt(
 
   // Win64 functions have extra shadow space for argument homing. Don't do the
   // sibcall if the caller and callee have mismatched expectations for this
-  // space.
+  // space. llvm-pe: a Win64 caller may jump to an internal-contract callee,
+  // which expects none; its memory arguments are checked below.
   CallingConv::ID CallerCC = CallerF.getCallingConv();
   bool IsCalleeWin64 = Subtarget.isCallingConvWin64(CalleeCC);
   bool IsCallerWin64 = Subtarget.isCallingConvWin64(CallerCC);
-  if (IsCalleeWin64 != IsCallerWin64)
+  if (IsCalleeWin64 != IsCallerWin64 &&
+      !(IsCallerWin64 && CalleeCC == X86::InternalCC))
     return false;
 
   // Do not optimize vararg calls with 6 arguments for LFI since LFI reserves

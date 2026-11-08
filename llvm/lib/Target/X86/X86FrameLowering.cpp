@@ -13,6 +13,7 @@
 #include "X86FrameLowering.h"
 #include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86.h"
+#include "X86CallingConv.h"
 #include "X86InstrBuilder.h"
 #include "X86InstrInfo.h"
 #include "X86MachineFunctionInfo.h"
@@ -1574,6 +1575,10 @@ bool X86FrameLowering::has128ByteRedZone(const MachineFunction &MF) const {
          "MF used frame lowering for wrong subtarget");
   const Function &Fn = MF.getFunction();
   const bool IsWin64CC = STI.isCallingConvWin64(Fn.getCallingConv());
+  // llvm-pe: the internal call contract runs on Windows, which promises
+  // nothing below RSP (exception dispatch and debuggers write there).
+  if (Fn.getCallingConv() == X86::InternalCC)
+    return false;
   return Is64Bit && !IsWin64CC && !Fn.hasFnAttribute(Attribute::NoRedZone);
 }
 

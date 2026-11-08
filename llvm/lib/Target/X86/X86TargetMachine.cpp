@@ -86,6 +86,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86FlagsCopyLoweringLegacyPass(PR);
   initializeX86LoadValueInjectionLoadHardeningLegacyPass(PR);
   initializeX86LoadValueInjectionRetHardeningLegacyPass(PR);
+  initializeX86InternalCallContractPass(PR);
   initializeX86OptimizeLEAsLegacyPass(PR);
   initializeX86PartialReductionLegacyPass(PR);
   initializeX86ReturnThunksLegacyPass(PR);
@@ -402,6 +403,13 @@ void X86PassConfig::addIRPasses() {
   addPass(createX86LowerAMXTypeLegacyPass());
 
   TargetPassConfig::addIRPasses();
+
+  // llvm-pe: the internal call contract for functions only called directly
+  // from this module (x86-64 Windows, -x86-internal-cc).
+  if (TM->getOptLevel() != CodeGenOptLevel::None &&
+      TM->getTargetTriple().isOSWindows() &&
+      TM->getTargetTriple().isX86_64())
+    addPass(createX86InternalCallContractPass());
 
   if (TM->getOptLevel() != CodeGenOptLevel::None) {
     addPass(createInterleavedAccessPass());

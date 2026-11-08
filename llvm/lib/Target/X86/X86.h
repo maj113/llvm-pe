@@ -406,6 +406,10 @@ public:
 
 FunctionPass *createX86FenceNonTemporalStoresLegacyPass();
 
+/// llvm-pe: gives X86::InternalCC to the functions of a Windows x86-64 module
+/// that are only ever called directly from it (-x86-internal-cc).
+ModulePass *createX86InternalCallContractPass();
+
 /// // Analyzes and emits pseudos to support Win x64 Unwind V2.
 class X86WinEHUnwindV2Pass
     : public OptionalPassInfoMixin<X86WinEHUnwindV2Pass> {
@@ -556,6 +560,7 @@ void initializeX86FlagsCopyLoweringLegacyPass(PassRegistry &);
 void initializeX86IndirectBranchTrackingLegacyPass(PassRegistry &);
 void initializeX86LoadValueInjectionLoadHardeningLegacyPass(PassRegistry &);
 void initializeX86LoadValueInjectionRetHardeningLegacyPass(PassRegistry &);
+void initializeX86InternalCallContractPass(PassRegistry &);
 void initializeX86LowerAMXIntrinsicsLegacyPassPass(PassRegistry &);
 void initializeX86LowerAMXTypeLegacyPassPass(PassRegistry &);
 void initializeX86LowerTileCopyLegacyPass(PassRegistry &);

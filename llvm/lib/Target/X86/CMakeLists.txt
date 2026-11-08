@@ -71,6 +71,7 @@ set(sources
   X86IndirectThunks.cpp
   X86InsertVZeroUpper.cpp
   X86InsertX87Wait.cpp
+  X86InternalCallContract.cpp
   X86InterleavedAccess.cpp
   X86InstCombineIntrinsic.cpp
   X86InstrFMA3Info.cpp

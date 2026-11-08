@@ -16,8 +16,23 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
+
+static cl::opt<X86::InternalCSR> InternalCCCSR(
+    "x86-internal-cc-csr",
+    cl::desc("Callee-saved set of the internal call contract (llvm-pe)"),
+    cl::init(X86::InternalCSR::Win64),
+    cl::values(clEnumValN(X86::InternalCSR::Win64, "win64",
+                          "RBX RBP RDI RSI R12-R15 XMM6-15, 6+6 argument "
+                          "registers"),
+               clEnumValN(X86::InternalCSR::SysV, "sysv",
+                          "RBX RBP R12-R15, 8+8 argument registers"),
+               clEnumValN(X86::InternalCSR::SysVXMM, "sysv-xmm",
+                          "RBX RBP R12-R15 XMM8-15, 8+8 argument registers")));
+
+X86::InternalCSR X86::getInternalCCCSR() { return InternalCCCSR; }
 
 /// When regcall calling convention compiled to 32 bit arch, special treatment
 /// is required for 64 bit masks.

@@ -1083,11 +1083,71 @@ def CC_X86_32 : CallingConv<[
   CCDelegateTo<CC_X86_32_C>
 ]>;
 
+// llvm-pe: the internal call contract of x86-64 Windows (X86::InternalCC,
+// given by X86InternalCallContract to functions only ever called directly from
+// their module). No shadow space, independent integer and vector argument
+// counters as on SysV, and as many argument registers as the callee-saved set
+// chosen by -x86-internal-cc-csr leaves free. Byval, x87 and fp128 arguments
+// go by pointer as on Win64; the pass rejects every other special attribute.
+class CC_X86_Win64_Internal_Base<list<Register> GPR8, list<Register> GPR16,
+                                 list<Register> GPR32, list<Register> GPR64,
+                                 list<Register> XMM, list<Register> YMM>
+    : CallingConv<[
+  CCIfByVal<CCPassIndirect<i64>>,
+  CCIfType<[i1, v1i1], CCPromoteToType<i8>>,
+  CCIfType<[v2i1],  CCPromoteToType<v2i64>>,
+  CCIfType<[v4i1],  CCPromoteToType<v4i32>>,
+  CCIfType<[v8i1],  CCPromoteToType<v8i16>>,
+  CCIfType<[v16i1], CCPromoteToType<v16i8>>,
+  CCIfType<[v32i1], CCPromoteToType<v32i8>>,
+  CCIfType<[v64i1], CCPromoteToType<v64i8>>,
+  // x87, fp128 and 512-bit vectors go by pointer, assigned like an i64 below.
+  CCIfType<[f80, f128, v64i8, v32i16, v16i32, v8i64, v32f16, v32bf16, v16f32,
+            v8f64], CCPassIndirect<i64>>,
+  CCIfType<[f32], CCIfNotSubtarget<"hasSSE1()", CCBitConvertToType<i32>>>,
+  CCIfType<[f64], CCIfNotSubtarget<"hasSSE1()", CCBitConvertToType<i64>>>,
+
+  CCIfType<[i8],  CCAssignToReg<GPR8>>,
+  CCIfType<[i16], CCAssignToReg<GPR16>>,
+  CCIfType<[i32], CCAssignToReg<GPR32>>,
+  CCIfType<[i64], CCAssignToReg<GPR64>>,
+
+  CCIfType<[f16, f32, f64, v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32,
+            v2f64], CCAssignToReg<XMM>>,
+  CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v16bf16, v8f32, v4f64],
+           CCIfSubtarget<"hasAVX()", CCAssignToReg<YMM>>>,
+
+  CCIfType<[i8, i16, i32, i64, f16, f32, f64], CCAssignToStack<8, 8>>,
+  CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v8bf16, v4f32, v2f64],
+           CCAssignToStack<16, 16>>,
+  CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v16bf16, v8f32, v4f64],
+           CCAssignToStack<32, 32>>
+]>;
+
+// RSI, RDI and XMM6-15 callee-saved (the Win64 set): six of each.
+def CC_X86_Win64_Internal6 : CC_X86_Win64_Internal_Base<
+  [CL, DL, R8B, R9B, R10B, R11B], [CX, DX, R8W, R9W, R10W, R11W],
+  [ECX, EDX, R8D, R9D, R10D, R11D], [RCX, RDX, R8, R9, R10, R11],
+  [XMM0, XMM1, XMM2, XMM3, XMM4, XMM5], [YMM0, YMM1, YMM2, YMM3, YMM4, YMM5]>;
+
+// RSI and RDI scratch (the SysV general-purpose set): eight of each.
+def CC_X86_Win64_Internal8 : CC_X86_Win64_Internal_Base<
+  [CL, DL, R8B, R9B, R10B, R11B, SIL, DIL],
+  [CX, DX, R8W, R9W, R10W, R11W, SI, DI],
+  [ECX, EDX, R8D, R9D, R10D, R11D, ESI, EDI],
+  [RCX, RDX, R8, R9, R10, R11, RSI, RDI],
+  [XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7],
+  [YMM0, YMM1, YMM2, YMM3, YMM4, YMM5, YMM6, YMM7]>;
+
 // This is the root argument convention for the X86-64 backend.
 def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_64_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_64_HiPE>>,
   CCIfCC<"CallingConv::AnyReg", CCDelegateTo<CC_X86_64_AnyReg>>,
+  CCIfCC<"X86::InternalCC",
+    CCIf<"X86::internalCCPreservesWin64Set()",
+         CCDelegateTo<CC_X86_Win64_Internal6>>>,
+  CCIfCC<"X86::InternalCC", CCDelegateTo<CC_X86_Win64_Internal8>>,
   CCIfCC<"CallingConv::Win64", CCDelegateTo<CC_X86_Win64_C>>,
   CCIfCC<"CallingConv::X86_64_SysV", CCDelegateTo<CC_X86_64_C>>,
   CCIfCC<"CallingConv::X86_VectorCall", CCDelegateTo<CC_X86_Win64_VectorCall>>,

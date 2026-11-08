@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "X86RegisterInfo.h"
+#include "X86CallingConv.h"
 #include "X86FrameLowering.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
@@ -296,6 +297,16 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     if (HasSSE)
       return HasEGPR ? CSR_Win64_APX_SaveList : CSR_Win64_SaveList;
     return CSR_Win64_NoSSE_SaveList;
+  case X86::InternalCC:
+    switch (X86::getInternalCCCSR()) {
+    case X86::InternalCSR::Win64:
+      return HasSSE ? CSR_Win64_SaveList : CSR_Win64_NoSSE_SaveList;
+    case X86::InternalCSR::SysV:
+      return CSR_64_SaveList;
+    case X86::InternalCSR::SysVXMM:
+      return HasSSE ? CSR_64_Intel_OCL_BI_SaveList : CSR_64_SaveList;
+    }
+    llvm_unreachable("unknown internal call contract");
   case CallingConv::SwiftTail:
     if (!Is64Bit)
       return CSR_32_SaveList;
@@ -444,6 +455,16 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     break;
   case CallingConv::Win64:
     return HasEGPR ? CSR_Win64_APX_RegMask : CSR_Win64_RegMask;
+  case X86::InternalCC:
+    switch (X86::getInternalCCCSR()) {
+    case X86::InternalCSR::Win64:
+      return CSR_Win64_RegMask;
+    case X86::InternalCSR::SysV:
+      return CSR_64_RegMask;
+    case X86::InternalCSR::SysVXMM:
+      return HasSSE ? CSR_64_Intel_OCL_BI_RegMask : CSR_64_RegMask;
+    }
+    llvm_unreachable("unknown internal call contract");
   case CallingConv::SwiftTail:
     if (!Is64Bit)
       return CSR_32_RegMask;
