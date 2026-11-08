@@ -467,6 +467,15 @@ public:
     return MI.isAsCheapAsAMove();
   }
 
+  /// llvm-pe: return true if \p MI, which defines the physical register
+  /// \p Reg, changes none of the bits its sub-registers cover (x86
+  /// VZEROUPPER on YMM0-15 leaves XMM0-15 alone). Interprocedural register
+  /// allocation then does not count those sub-registers as clobbered.
+  virtual bool preservesSubRegsOnDef(const MachineInstr &MI,
+                                     MCRegister Reg) const {
+    return false;
+  }
+
   /// Return true if the instruction should be sunk by MachineSink.
   ///
   /// MachineSink determines on its own whether the instruction is safe to sink;

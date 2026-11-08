@@ -355,6 +355,12 @@ public:
                                     int &FrameIndex) const override;
 
   bool isReMaterializableImpl(const MachineInstr &MI) const override;
+
+  /// llvm-pe: VZEROUPPER's YMM0-15 definitions keep XMM0-15.
+  bool preservesSubRegsOnDef(const MachineInstr &MI,
+                             MCRegister Reg) const override {
+    return MI.getOpcode() == X86::VZEROUPPER;
+  }
   void
   reMaterialize(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
                 Register DestReg, unsigned SubIdx, const MachineInstr &Orig,

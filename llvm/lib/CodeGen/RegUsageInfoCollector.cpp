@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegisterUsageInfo.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
@@ -177,13 +178,33 @@ bool RegUsageInfoCollector::run(MachineFunction &MF) {
   // Scan all the physical registers. When a register is defined in the current
   // function set it and all the aliasing registers as defined in the regmask.
   // FIXME: Rewrite to use regunits.
+  const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
   for (unsigned PReg = 1, PRegE = TRI->getNumRegs(); PReg < PRegE; ++PReg) {
-    // Don't count registers that are saved and restored.
-    if (SavedRegs.test(PReg))
+    // Registers that are saved and restored are preserved. llvm-pe: writing
+    // one may still change the bits of a super-register it does not cover
+    // (x86 VEX writes zero the upper half of a YMM register), so unsaved
+    // super-registers of a defined saved register are clobbered.
+    if (SavedRegs.test(PReg)) {
+      if (!MRI->def_empty(PReg))
+        for (MCPhysReg Super : TRI->superregs(PReg))
+          if (!SavedRegs.test(Super))
+            SetRegAsDefined(Super);
       continue;
+    }
     // If a register is defined by an instruction mark it as defined together
-    // with all it's unsaved aliases.
+    // with all it's unsaved aliases. llvm-pe: when every definition keeps
+    // the sub-registers (x86 VZEROUPPER), only the register and its
+    // super-registers are.
     if (!MRI->def_empty(PReg)) {
+      if (all_of(MRI->def_instructions(PReg), [&](const MachineInstr &MI) {
+            return TII->preservesSubRegsOnDef(MI, PReg);
+          })) {
+        SetRegAsDefined(PReg);
+        for (MCPhysReg Super : TRI->superregs(PReg))
+          if (!SavedRegs.test(Super))
+            SetRegAsDefined(Super);
+        continue;
+      }
       for (MCRegAliasIterator AI(PReg, TRI, true); AI.isValid(); ++AI)
         if (!SavedRegs.test((*AI).id()))
           SetRegAsDefined(*AI);
